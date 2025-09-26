@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.db.models import Prefetch
 from django.db import transaction
+from datetime import timedelta
 
 from .models import PickupPoint, WarehouseCN, Order, TrackingEvent
 from .serializers import (
@@ -185,17 +186,17 @@ class OrderTrackAPIView(APIView):
 
 
 class OrderScanAPIView(generics.CreateAPIView):
-    """
-    POST /orders/scan/
-    Принимает {tracking_number, location?} и продвигает заказ на следующий статус.
-    По умолчанию доступ ограничен аутентифицированным пользователям (смените на AllowAny при необходимости).
-    """
     serializer_class = OrderScanSerializer
-    permission_classes = [IsAuthenticated]  # или [AllowAny], если сканер без авторизации
+    permission_classes = [IsAuthenticated]  # или AllowAny
 
-    # если нужно использовать request.user при создании нового заказа:
-    def perform_create(self, serializer):
-        serializer.save()  # handle_scan внутренний — user не обязателен; можно передать user=self.request.user
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = serializer.save()  # {"order": ..., "created_event": ...}
+
+        # 201 — если реально создано новое событие; 200 — если уже финальный статус
+        status_code = status.HTTP_201_CREATED if result.get("created_event") else status.HTTP_200_OK
+        return Response(serializer.data, status=status_code)
 
 class OrderFindAPIView(APIView):
     """

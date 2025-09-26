@@ -7,8 +7,11 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 
 from rest_framework import serializers
-from rest_framework.exceptions import AuthenticationFailed, ValidationError
+from rest_framework.exceptions import AuthenticationFailed, ValidationError, Throttled
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+# from datetime import timezone
+from django.utils import timezone
+
 
 from .models import PickupPoint, WarehouseCN, User, Order, TrackingEvent, handle_scan
 
@@ -315,33 +318,31 @@ class OrderSerializer(serializers.ModelSerializer):
 #  Сканер
 # -------------------------
 class OrderScanSerializer(serializers.Serializer):
-    """Сериалайзер для POST /scan/"""
+    """Сериалайзер для POST /orders/scan/"""
     tracking_number = serializers.CharField()
     location = serializers.CharField(required=False, allow_blank=True)
 
-    # опционально — для удобства ответа
     order = OrderSerializer(read_only=True)
     created_event = TrackingEventSerializer(read_only=True)
 
     def create(self, validated_data):
-        tn = validated_data["tracking_number"]
+        tn = validated_data["tracking_number"].strip()
         location = validated_data.get("location", "")
 
         try:
-            order, event = handle_scan(tn, location=location)
+            order, event = handle_scan(tn, location=location, raise_on_cooldown=True)
         except ValueError as e:
-            # кулдаун/частые сканы
-            raise ValidationError({"detail": str(e)})
+            last = Order.objects.get(tracking_number=tn).last_event
+            cooldown_min = getattr(settings, "SCAN_COOLDOWN_MINUTES", 5)
+            # считаем сколько осталось
+            diff = timezone.now() - last.timestamp
+            remain = max(0, cooldown_min * 60 - int(diff.total_seconds()))
+            raise Throttled(detail=str(e), wait=remain)
 
-        # отдаём полезный ответ
-        self.instance = {
-            "order": order,
-            "created_event": event,
-        }
+        self.instance = {"order": order, "created_event": event}
         return self.instance
 
     def to_representation(self, instance):
-        # красиво сериализуем order + event
         return {
             "order": OrderSerializer(instance["order"]).data,
             "created_event": (
