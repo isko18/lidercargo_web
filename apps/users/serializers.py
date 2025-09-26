@@ -7,12 +7,15 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 
 from rest_framework import serializers
-from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import AuthenticationFailed, ValidationError
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from .models import PickupPoint, WarehouseCN, User, Order, TrackingEvent
+from .models import PickupPoint, WarehouseCN, User, Order, TrackingEvent, handle_scan
 
 
+# -------------------------
+#  Пользователь / Регистрация
+# -------------------------
 class RegisterSerializer(serializers.ModelSerializer):
     pickup_point_id = serializers.PrimaryKeyRelatedField(
         source="pickup_point",
@@ -22,7 +25,7 @@ class RegisterSerializer(serializers.ModelSerializer):
     client_code = serializers.CharField(read_only=True)
     cn_warehouse_address = serializers.SerializerMethodField(read_only=True)
 
-    # 🔹 добавляем ручной ввод lc_number и region_code
+    # опциональные ручные поля
     lc_number = serializers.CharField(required=False, allow_blank=True)
     region_code = serializers.CharField(required=False, allow_blank=True)
 
@@ -63,11 +66,10 @@ class RegisterSerializer(serializers.ModelSerializer):
         email = validated_data.get("email")
         if email:
             validated_data["email"] = email.strip().lower()
+
         user = User.objects.create_user(password=password, **validated_data)
-        # 🔹 client_code теперь формируется напрямую
         if not user.client_code:
-            user.client_code = user.client_code_display
-            user.save(update_fields=["client_code"])
+            user.assign_client_code(save=True)
         return user
 
     def get_cn_warehouse_address(self, obj: User):
@@ -84,9 +86,9 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token["full_name"] = user.full_name
         token["client_code"] = user.client_code
         token["pvz_id"] = user.pickup_point_id
-        # добавим коды, чтобы фронту было проще
         token["pvz_region"] = user.pickup_point.region_code
         token["pvz_branch"] = user.pickup_point.branch_code
+        token["pvz_lc_prefix"] = user.pickup_point.lc_prefix
         return token
 
     def validate(self, attrs):
@@ -111,6 +113,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 "code_label": pvz.code_label,
                 "region_code": pvz.region_code,
                 "branch_code": pvz.branch_code,
+                "lc_prefix": pvz.lc_prefix,
             },
             "cn_warehouse_address": self.user.cn_warehouse_address,
             "is_staff": self.user.is_staff,
@@ -118,6 +121,9 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return data
 
 
+# -------------------------
+#  Password reset
+# -------------------------
 class PasswordResetRequestSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
@@ -126,7 +132,6 @@ class PasswordResetRequestSerializer(serializers.Serializer):
         try:
             user = User.objects.get(email__iexact=email)
         except User.DoesNotExist:
-            # не раскрываем, существует пользователь или нет
             self.instance = {"detail": "Если этот email зарегистрирован, мы отправили ссылку для восстановления."}
             return self.instance
 
@@ -141,12 +146,16 @@ class PasswordResetRequestSerializer(serializers.Serializer):
             f"Для сброса пароля перейдите по ссылке:\n{reset_link}\n\n"
             f"Если вы не запрашивали сброс, просто игнорируйте это письмо."
         )
-        send_mail(subject, message, getattr(settings, "DEFAULT_FROM_EMAIL", None),
-                  [email], fail_silently=True)
+        send_mail(
+            subject,
+            message,
+            getattr(settings, "DEFAULT_FROM_EMAIL", None),
+            [email],
+            fail_silently=True,
+        )
 
         self.instance = {"detail": "Если этот email зарегистрирован, мы отправили ссылку для восстановления."}
         if getattr(settings, "DEBUG", False):
-            # удобно для тестов (убери на проде)
             self.instance.update({"uid": uid, "token": token, "reset_link": reset_link})
         return self.instance
 
@@ -182,6 +191,9 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         return instance
 
 
+# -------------------------
+#  Справочники
+# -------------------------
 class WarehouseCNSerializer(serializers.ModelSerializer):
     class Meta:
         model = WarehouseCN
@@ -199,13 +211,17 @@ class PickupPointSerializer(serializers.ModelSerializer):
             "name_kg",
             "address",
             "code_label",
-            "region_code",      # добавлено
-            "branch_code",      # добавлено
+            "region_code",
+            "branch_code",
+            "lc_prefix",
             "default_cn_warehouse",
             "is_active",
         )
 
 
+# -------------------------
+#  Профиль
+# -------------------------
 class ProfileSerializer(serializers.ModelSerializer):
     pickup_point = PickupPointSerializer(read_only=True)
     client_code_display = serializers.CharField(read_only=True)
@@ -253,12 +269,16 @@ class ProfileSerializer(serializers.ModelSerializer):
         instance.pickup_point = pickup_new
         instance.save(update_fields=["full_name", "email", "pickup_point", "updated_at"])
 
+        # Если ПВЗ изменился — переназначаем клиентский код
         if pickup_new.id != pickup_was:
             instance.assign_client_code(save=True)
 
         return instance
 
 
+# -------------------------
+#  Трекинг
+# -------------------------
 class TrackingEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = TrackingEvent
@@ -268,6 +288,8 @@ class TrackingEventSerializer(serializers.ModelSerializer):
 class OrderSerializer(serializers.ModelSerializer):
     events = TrackingEventSerializer(many=True, read_only=True)
     last_status = serializers.CharField(read_only=True)
+    next_status = serializers.SerializerMethodField()
+    can_scan = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -277,5 +299,53 @@ class OrderSerializer(serializers.ModelSerializer):
             "description",
             "created_at",
             "last_status",
+            "next_status",
+            "can_scan",
             "events",
         )
+
+    def get_next_status(self, obj: Order):
+        return obj.next_status
+
+    def get_can_scan(self, obj: Order):
+        return obj.can_scan()
+
+
+# -------------------------
+#  Сканер
+# -------------------------
+class OrderScanSerializer(serializers.Serializer):
+    """Сериалайзер для POST /scan/"""
+    tracking_number = serializers.CharField()
+    location = serializers.CharField(required=False, allow_blank=True)
+
+    # опционально — для удобства ответа
+    order = OrderSerializer(read_only=True)
+    created_event = TrackingEventSerializer(read_only=True)
+
+    def create(self, validated_data):
+        tn = validated_data["tracking_number"]
+        location = validated_data.get("location", "")
+
+        try:
+            order, event = handle_scan(tn, location=location)
+        except ValueError as e:
+            # кулдаун/частые сканы
+            raise ValidationError({"detail": str(e)})
+
+        # отдаём полезный ответ
+        self.instance = {
+            "order": order,
+            "created_event": event,
+        }
+        return self.instance
+
+    def to_representation(self, instance):
+        # красиво сериализуем order + event
+        return {
+            "order": OrderSerializer(instance["order"]).data,
+            "created_event": (
+                TrackingEventSerializer(instance["created_event"]).data
+                if instance["created_event"] else None
+            ),
+        }

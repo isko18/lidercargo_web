@@ -1,72 +1,64 @@
 from django.urls import path
-from rest_framework import generics, status
+from rest_framework import generics, status, permissions
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
 from rest_framework.response import Response
-from .models import PickupPoint, WarehouseCN, Order
-from rest_framework import generics, permissions
 from django.shortcuts import get_object_or_404
+from django.db.models import Prefetch
+from django.db import transaction
+
+from .models import PickupPoint, WarehouseCN, Order, TrackingEvent
 from .serializers import (
     RegisterSerializer,
     PickupPointSerializer,
     WarehouseCNSerializer,
     CustomTokenObtainPairSerializer,
     PasswordResetConfirmSerializer,
-    PasswordResetRequestSerializer, 
+    PasswordResetRequestSerializer,
     ProfileSerializer,
-    OrderSerializer
+    OrderSerializer,
+    OrderScanSerializer,
 )
 
 
-
+# -------------------------
+#   Auth
+# -------------------------
 class RegisterAPIView(generics.CreateAPIView):
     """POST /auth/register/ — создаёт пользователя и возвращает профиль."""
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     """POST /auth/login/ — телефон + пароль -> токены + user."""
     serializer_class = CustomTokenObtainPairSerializer
     permission_classes = [AllowAny]
 
-class PickupPointList(generics.ListAPIView):
-    serializer_class = PickupPointSerializer
-    permission_classes = [AllowAny]
-    def get_queryset(self):
-        return PickupPoint.objects.filter(is_active=True).select_related("default_cn_warehouse")
 
-class PickupPointDetail(generics.RetrieveAPIView):
-    serializer_class = PickupPointSerializer
+# (по желанию) стандартный рефреш
+class CustomTokenRefreshView(TokenRefreshView):
     permission_classes = [AllowAny]
-    def get_queryset(self):
-        return PickupPoint.objects.filter(is_active=True).select_related("default_cn_warehouse")
 
-class WarehouseCNList(generics.ListAPIView):
-    serializer_class = WarehouseCNSerializer
-    permission_classes = [AllowAny]
-    def get_queryset(self):
-        return WarehouseCN.objects.filter(is_active=True)
 
-class WarehouseCNDetail(generics.RetrieveAPIView):
-    serializer_class = WarehouseCNSerializer
-    permission_classes = [AllowAny]
-    def get_queryset(self):
-        return WarehouseCN.objects.filter(is_active=True)
-    
 class PasswordResetRequestAPIView(generics.CreateAPIView):
+    """POST /auth/password-reset/"""
     permission_classes = [AllowAny]
     serializer_class = PasswordResetRequestSerializer
 
+
 class PasswordResetConfirmAPIView(generics.CreateAPIView):
+    """POST /auth/password-reset/confirm/"""
     permission_classes = [AllowAny]
     serializer_class = PasswordResetConfirmSerializer
 
-# --- новое: логаут ---
+
 class LogoutAPIView(APIView):
     """
+    POST /auth/logout/
     Принимает refresh-токен и помещает его в blacklist.
     Не требуем auth, чтобы можно было выйти даже с просроченным access.
     """
@@ -87,6 +79,7 @@ class LogoutAPIView(APIView):
 
 class LogoutAllAPIView(APIView):
     """
+    POST /auth/logout-all/
     Разлогинить пользователя на всех устройствах.
     Требует действующий access (IsAuthenticated).
     """
@@ -100,7 +93,11 @@ class LogoutAllAPIView(APIView):
             except Exception:
                 pass
         return Response(status=status.HTTP_205_RESET_CONTENT)
-    
+
+
+# -------------------------
+#   Profile
+# -------------------------
 class MeAPIView(generics.RetrieveUpdateAPIView):
     """
     GET  /me/    -> профиль текущего пользователя
@@ -111,18 +108,62 @@ class MeAPIView(generics.RetrieveUpdateAPIView):
 
     def get_object(self):
         return self.request.user
-    
 
 
+# -------------------------
+#   Справочники
+# -------------------------
+class PickupPointList(generics.ListAPIView):
+    serializer_class = PickupPointSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        return PickupPoint.objects.filter(is_active=True).select_related("default_cn_warehouse")
 
 
+class PickupPointDetail(generics.RetrieveAPIView):
+    serializer_class = PickupPointSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        return PickupPoint.objects.filter(is_active=True).select_related("default_cn_warehouse")
+
+
+class WarehouseCNList(generics.ListAPIView):
+    serializer_class = WarehouseCNSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        return WarehouseCN.objects.filter(is_active=True)
+
+
+class WarehouseCNDetail(generics.RetrieveAPIView):
+    serializer_class = WarehouseCNSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        return WarehouseCN.objects.filter(is_active=True)
+
+
+# -------------------------
+#   Orders
+# -------------------------
 class MyOrdersAPIView(generics.ListAPIView):
     """GET /orders/ — список заказов текущего пользователя"""
     serializer_class = OrderSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Order.objects.filter(user=self.request.user)
+        return (
+            Order.objects.filter(user=self.request.user)
+            .prefetch_related(
+                Prefetch(
+                    "events",
+                    queryset=TrackingEvent.objects.order_by("timestamp"),
+                )
+            )
+            .order_by("-created_at")
+        )
 
 
 class OrderTrackAPIView(APIView):
@@ -130,6 +171,98 @@ class OrderTrackAPIView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, tracking_number: str):
-        order = get_object_or_404(Order, tracking_number=tracking_number)
+        order = get_object_or_404(
+            Order.objects.prefetch_related(
+                Prefetch(
+                    "events",
+                    queryset=TrackingEvent.objects.order_by("timestamp"),
+                )
+            ),
+            tracking_number=tracking_number,
+        )
         serializer = OrderSerializer(order)
         return Response(serializer.data)
+
+
+class OrderScanAPIView(generics.CreateAPIView):
+    """
+    POST /orders/scan/
+    Принимает {tracking_number, location?} и продвигает заказ на следующий статус.
+    По умолчанию доступ ограничен аутентифицированным пользователям (смените на AllowAny при необходимости).
+    """
+    serializer_class = OrderScanSerializer
+    permission_classes = [IsAuthenticated]  # или [AllowAny], если сканер без авторизации
+
+    # если нужно использовать request.user при создании нового заказа:
+    def perform_create(self, serializer):
+        serializer.save()  # handle_scan внутренний — user не обязателен; можно передать user=self.request.user
+
+class OrderFindAPIView(APIView):
+    """
+    GET /orders/find/?tracking_number=AB123
+    Возвращает заказ (если есть) + флаги:
+      - is_owner: заказ уже принадлежит вам
+      - can_claim: можно ли привязать к себе (никому не принадлежит или уже ваш)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        tn = request.query_params.get("tracking_number") or request.query_params.get("q")
+        if not tn:
+            return Response({"detail": "Укажите параметр tracking_number."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            order = (
+                Order.objects
+                .prefetch_related(Prefetch("events", queryset=TrackingEvent.objects.order_by("timestamp")))
+                .get(tracking_number=tn.strip())
+            )
+        except Order.DoesNotExist:
+            return Response({"detail": "Трек не найден."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_owner = (order.user_id == request.user.id)
+        can_claim = (order.user_id is None) or is_owner
+
+        data = OrderSerializer(order).data
+        data.update({"is_owner": is_owner, "can_claim": can_claim})
+        return Response(data, status=status.HTTP_200_OK)
+
+
+# =========================
+# NEW: Привязать заказ к себе
+# =========================
+class OrderClaimAPIView(APIView):
+    """
+    POST /orders/claim/
+    body: {"tracking_number": "AB123"}
+    Привязывает заказ к текущему пользователю, если он свободен.
+    Если уже привязан к другому — 409.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        tn = (request.data.get("tracking_number") or "").strip()
+        if not tn:
+            return Response({"detail": "Укажите tracking_number."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            try:
+                order = Order.objects.select_for_update().get(tracking_number=tn)
+            except Order.DoesNotExist:
+                return Response({"detail": "Трек не найден."}, status=status.HTTP_404_NOT_FOUND)
+
+            # если уже ваш — просто возвращаем
+            if order.user_id == request.user.id:
+                return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
+
+            # если свободен — привязываем
+            if order.user_id is None:
+                order.user = request.user
+                order.save(update_fields=["user"])
+                return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
+
+            # уже принадлежит кому-то другому
+            return Response(
+                {"detail": "Этот трек уже закреплён за другим пользователем."},
+                status=status.HTTP_409_CONFLICT,
+            )

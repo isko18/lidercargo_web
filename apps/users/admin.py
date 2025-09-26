@@ -73,6 +73,7 @@ def generate_missing_codes(modeladmin, request, queryset):
 @admin.action(description="Перегенерировать клиентские коды (ОСТОРОЖНО: изменит текущие коды)")
 def regenerate_codes(modeladmin, request, queryset):
     for u in queryset:
+        # assign_client_code: если lc_number уже есть — только пересоберёт client_code с новым префиксом ПВЗ
         u.assign_client_code()
     modeladmin.message_user(request, f"Коды пересчитаны для {queryset.count()} пользователей")
 
@@ -165,13 +166,29 @@ class UserInline(admin.TabularInline):
 
 @admin.register(PickupPoint)
 class PickupPointAdmin(admin.ModelAdmin):
-    list_display = ("id", "name_ru", "code_label", "default_cn_warehouse", "is_active", "users_count", "updated_at")
-    list_filter = ("is_active", "default_cn_warehouse")
-    search_fields = ("name_ru", "name_kg", "address", "code_label")
+    list_display = (
+        "id",
+        "name_ru",
+        "code_label",
+        "region_code",
+        "branch_code",
+        "lc_prefix",                # 🔹 показываем префикс LC
+        "default_cn_warehouse",
+        "is_active",
+        "users_count",
+        "updated_at",
+    )
+    list_filter = ("is_active", "default_cn_warehouse", "lc_prefix")  # 🔹 фильтр по префиксу
+    search_fields = ("name_ru", "name_kg", "address", "code_label", "lc_prefix")  # 🔹 поиск по префиксу
     autocomplete_fields = ("default_cn_warehouse",)
     ordering = ("name_ru",)
 
     inlines = [UserInline]
+
+    # Можно явно указать поля редактирования, если хотите:
+    # fields = ("name_ru", "name_kg", "address", "code_label", "region_code", "branch_code", "lc_prefix",
+    #           "default_cn_warehouse", "is_active", "created_at", "updated_at")
+    # readonly_fields = ("created_at", "updated_at")
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
@@ -181,10 +198,11 @@ class PickupPointAdmin(admin.ModelAdmin):
     def users_count(self, obj):
         return getattr(obj, "_users_count", obj.users.count())
 
+
 @admin.register(ClientCodeCounter)
 class ClientCodeCounterAdmin(admin.ModelAdmin):
     list_display = ("pickup_point", "last_number", "updated_at")
-    search_fields = ("pickup_point__name_ru",)
+    search_fields = ("pickup_point__name_ru", "pickup_point__lc_prefix")
     readonly_fields = ("updated_at",)
     autocomplete_fields = ("pickup_point",)
 
