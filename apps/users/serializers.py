@@ -140,7 +140,7 @@ class PasswordResetRequestSerializer(serializers.Serializer):
 
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = default_token_generator.make_token(user)
-        base = getattr(settings, "PASSWORD_RESET_FRONTEND_URL", "https://example.com/password-reset")
+        base = getattr(settings, "PASSWORD_RESET_FRONTEND_URL", "https://lc189.com.kg/v1/api/users/auth/password-reset/confirm/")
         reset_link = f"{base}?uid={uid}&token={token}"
 
         subject = "Сброс пароля LIDER CARGO"

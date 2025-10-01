@@ -10,6 +10,7 @@ from django.shortcuts import get_object_or_404
 from django.db.models import Prefetch
 from django.db import transaction
 from datetime import timedelta
+from django.shortcuts import render
 
 from .models import PickupPoint, WarehouseCN, Order, TrackingEvent
 from .serializers import (
@@ -28,6 +29,9 @@ from .serializers import (
 # -------------------------
 #   Auth
 # -------------------------
+def index(request):
+    return render(request, 'index.html')
+
 class RegisterAPIView(generics.CreateAPIView):
     """POST /auth/register/ — создаёт пользователя и возвращает профиль."""
     serializer_class = RegisterSerializer
