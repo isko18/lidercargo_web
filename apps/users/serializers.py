@@ -7,11 +7,9 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 
 from rest_framework import serializers
-from rest_framework.exceptions import AuthenticationFailed, ValidationError, Throttled
+from rest_framework.exceptions import AuthenticationFailed, ValidationError, Throttled, PermissionDenied
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-# from datetime import timezone
 from django.utils import timezone
-
 
 from .models import PickupPoint, WarehouseCN, User, Order, TrackingEvent, handle_scan
 
@@ -92,6 +90,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token["pvz_region"] = user.pickup_point.region_code
         token["pvz_branch"] = user.pickup_point.branch_code
         token["pvz_lc_prefix"] = user.pickup_point.lc_prefix
+        token["is_employee"] = user.is_employee  # новое
         return token
 
     def validate(self, attrs):
@@ -120,6 +119,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             },
             "cn_warehouse_address": self.user.cn_warehouse_address,
             "is_staff": self.user.is_staff,
+            "is_employee": self.user.is_employee,  # новое
         }
         return data
 
@@ -250,8 +250,9 @@ class ProfileSerializer(serializers.ModelSerializer):
             "client_code_display",
             "cn_warehouse_address",
             "is_staff",
+            "is_employee",           # новое: полезно видеть в профиле
         )
-        read_only_fields = ("phone", "client_code", "is_staff")
+        read_only_fields = ("phone", "client_code", "is_staff", "is_employee")
 
     def validate_email(self, value):
         if value is None or value == "":
@@ -283,9 +284,14 @@ class ProfileSerializer(serializers.ModelSerializer):
 #  Трекинг
 # -------------------------
 class TrackingEventSerializer(serializers.ModelSerializer):
+    actor_name = serializers.SerializerMethodField()  # кто сканировал (если это ручной скан)
+
     class Meta:
         model = TrackingEvent
-        fields = ("id", "status", "location", "timestamp")
+        fields = ("id", "status", "location", "timestamp", "actor_name")
+
+    def get_actor_name(self, obj):
+        return getattr(obj.actor, "full_name", None)
 
 
 class OrderSerializer(serializers.ModelSerializer):
@@ -329,8 +335,17 @@ class OrderScanSerializer(serializers.Serializer):
         tn = validated_data["tracking_number"].strip()
         location = validated_data.get("location", "")
 
+        # передаём текущего пользователя в handle_scan — он проверит, сотрудник ли это
+        user = None
+        request = self.context.get("request")
+        if request and getattr(request, "user", None) and request.user.is_authenticated:
+            user = request.user
+
         try:
-            order, event = handle_scan(tn, location=location, raise_on_cooldown=True)
+            order, event = handle_scan(tn, location=location, user=user, raise_on_cooldown=True)
+        except PermissionError as e:
+            # доступ только для сотрудников
+            raise PermissionDenied(detail=str(e))
         except ValueError as e:
             last = Order.objects.get(tracking_number=tn).last_event
             cooldown_min = getattr(settings, "SCAN_COOLDOWN_MINUTES", 5)

@@ -25,12 +25,16 @@ from .serializers import (
     OrderScanSerializer,
 )
 
+# 👇 НОВОЕ: подключаем пермишен
+from .permissions import IsEmployee
+
 
 # -------------------------
 #   Auth
 # -------------------------
 def index(request):
     return render(request, 'index.html')
+
 
 class RegisterAPIView(generics.CreateAPIView):
     """POST /auth/register/ — создаёт пользователя и возвращает профиль."""
@@ -44,7 +48,6 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     permission_classes = [AllowAny]
 
 
-# (по желанию) стандартный рефреш
 class CustomTokenRefreshView(TokenRefreshView):
     permission_classes = [AllowAny]
 
@@ -77,7 +80,6 @@ class LogoutAPIView(APIView):
             token = RefreshToken(refresh)
             token.blacklist()
         except Exception:
-            # на неверный/просроченный тоже отвечаем 205, не даём утечек
             pass
         return Response(status=status.HTTP_205_RESET_CONTENT)
 
@@ -176,6 +178,7 @@ class OrderTrackAPIView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, tracking_number: str):
+        tracking_number = (tracking_number or "").strip().upper()  # 👈 нормализация трека
         order = get_object_or_404(
             Order.objects.prefetch_related(
                 Prefetch(
@@ -191,9 +194,14 @@ class OrderTrackAPIView(APIView):
 
 class OrderScanAPIView(generics.CreateAPIView):
     serializer_class = OrderScanSerializer
-    permission_classes = [IsAuthenticated]  # или AllowAny
+    # 👇 только авторизованные + только сотрудники/админы
+    permission_classes = [IsAuthenticated, IsEmployee]
 
     def create(self, request, *args, **kwargs):
+        # опционально нормализуем трек ещё до сериалайзера
+        if "tracking_number" in request.data and isinstance(request.data["tracking_number"], str):
+            request.data["tracking_number"] = request.data["tracking_number"].strip().upper()
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         result = serializer.save()  # {"order": ..., "created_event": ...}
@@ -201,6 +209,7 @@ class OrderScanAPIView(generics.CreateAPIView):
         # 201 — если реально создано новое событие; 200 — если уже финальный статус
         status_code = status.HTTP_201_CREATED if result.get("created_event") else status.HTTP_200_OK
         return Response(serializer.data, status=status_code)
+
 
 class OrderFindAPIView(APIView):
     """
@@ -216,11 +225,13 @@ class OrderFindAPIView(APIView):
         if not tn:
             return Response({"detail": "Укажите параметр tracking_number."}, status=status.HTTP_400_BAD_REQUEST)
 
+        tn = tn.strip().upper()  # 👈 нормализация трека
+
         try:
             order = (
                 Order.objects
                 .prefetch_related(Prefetch("events", queryset=TrackingEvent.objects.order_by("timestamp")))
-                .get(tracking_number=tn.strip())
+                .get(tracking_number=tn)
             )
         except Order.DoesNotExist:
             return Response({"detail": "Трек не найден."}, status=status.HTTP_404_NOT_FOUND)
@@ -246,7 +257,7 @@ class OrderClaimAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        tn = (request.data.get("tracking_number") or "").strip()
+        tn = (request.data.get("tracking_number") or "").strip().upper()  # 👈 нормализация трека
         if not tn:
             return Response({"detail": "Укажите tracking_number."}, status=status.HTTP_400_BAD_REQUEST)
 

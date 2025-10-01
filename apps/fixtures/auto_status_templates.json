@@ -1,0 +1,66 @@
+[
+  { "model": "users.autostatustemplate", "pk": 1001, "fields": {
+    "phase": "AFTER_SCAN_1", "order_index": 10,
+    "text": "Товар отправлен на хранение.", "offset_minutes": 60, "is_active": true
+  }},
+
+  { "model": "users.autostatustemplate", "pk": 2001, "fields": {
+    "phase": "AFTER_SCAN_2", "order_index": 10,
+    "text": "Товар отправлен грузовиком и уже в пути.", "offset_minutes": 60, "is_active": true
+  }},
+  { "model": "users.autostatustemplate", "pk": 2002, "fields": {
+    "phase": "AFTER_SCAN_2", "order_index": 20,
+    "text": "По пути в Кашгар.", "offset_minutes": 180, "is_active": true
+  }},
+  { "model": "users.autostatustemplate", "pk": 2003, "fields": {
+    "phase": "AFTER_SCAN_2", "order_index": 30,
+    "text": "Товар прибыл на склад [Кашгар]. Начало экспортного таможенного оформления.",
+    "offset_minutes": 360, "is_active": true
+  }},
+  { "model": "users.autostatustemplate", "pk": 2004, "fields": {
+    "phase": "AFTER_SCAN_2", "order_index": 40,
+    "text": "Экспортное таможенное оформление завершено.", "offset_minutes": 420, "is_active": true
+  }},
+  { "model": "users.autostatustemplate", "pk": 2005, "fields": {
+    "phase": "AFTER_SCAN_2", "order_index": 50,
+    "text": "Товар отправлен со склада [Кашгар] в [{dest_city}].", "offset_minutes": 450, "is_active": true
+  }},
+  { "model": "users.autostatustemplate", "pk": 2006, "fields": {
+    "phase": "AFTER_SCAN_2", "order_index": 60,
+    "text": "Товар прибыл в [{dest_city}].", "offset_minutes": 1440, "is_active": true
+  }},
+  { "model": "users.autostatustemplate", "pk": 2007, "fields": {
+    "phase": "AFTER_SCAN_2", "order_index": 70,
+    "text": "Начинается импортное таможенное оформление.", "offset_minutes": 1460, "is_active": true
+  }},
+  { "model": "users.autostatustemplate", "pk": 2008, "fields": {
+    "phase": "AFTER_SCAN_2", "order_index": 80,
+    "text": "Импортное таможенное оформление завершено.", "offset_minutes": 1560, "is_active": true
+  }},
+  { "model": "users.autostatustemplate", "pk": 2009, "fields": {
+    "phase": "AFTER_SCAN_2", "order_index": 90,
+    "text": "Классификация и обработка.", "offset_minutes": 1620, "is_active": true
+  }},
+
+  { "model": "users.autostatustemplate", "pk": 3001, "fields": {
+    "phase": "AFTER_SCAN_3", "order_index": 10,
+    "text": "Отправлено SMS: посылка ожидает в [{pvz_name}] ({pvz_code}).", "offset_minutes": 5, "is_active": true
+  }},
+  { "model": "users.autostatustemplate", "pk": 3002, "fields": {
+    "phase": "AFTER_SCAN_3", "order_index": 20,
+    "text": "Посылка ожидает выдачи в [{pvz_name}] ({pvz_code}).", "offset_minutes": 60, "is_active": true
+  }},
+  { "model": "users.autostatustemplate", "pk": 3003, "fields": {
+    "phase": "AFTER_SCAN_3", "order_index": 30,
+    "text": "Напоминание: посылка ожидает получения.", "offset_minutes": 1440, "is_active": true
+  }},
+
+  { "model": "users.autostatustemplate", "pk": 4001, "fields": {
+    "phase": "AFTER_SCAN_4", "order_index": 10,
+    "text": "Заказ закрыт.", "offset_minutes": 0, "is_active": true
+  }},
+  { "model": "users.autostatustemplate", "pk": 4002, "fields": {
+    "phase": "AFTER_SCAN_4", "order_index": 20,
+    "text": "Спасибо за обращение в [{pvz_name}]!", "offset_minutes": 1, "is_active": true
+  }}
+]

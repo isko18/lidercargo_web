@@ -14,7 +14,7 @@ class Order(models.Model):
 
     TRACK_NUMBER_MAX_LENGTH = 32
 
-    # Шаги обработки по порядку
+    # Шаги обработки по порядку (4 ручных скана)
     STATUS_FLOW = [
         "Товар поступил на склад в Китае",
         "Товар отправлен со склада",
@@ -58,25 +58,104 @@ class Order(models.Model):
         ev = self.last_event
         return ev.status if ev else None
 
+    # >>> НОВОЕ: считаем только РУЧНЫЕ сканы <<<
+    @property
+    def last_manual_event(self):
+        """Последний РУЧНОЙ скан (actor не NULL)."""
+        return self.events.filter(actor__isnull=False).order_by("-timestamp").first()
+
+    @property
+    def manual_scan_count(self) -> int:
+        """Сколько ручных сканов уже сделано (для вычисления шага 1..4)."""
+        return self.events.filter(actor__isnull=False).count()
+
     @property
     def next_status(self):
-        """Какой статус должен быть следующим (по количеству уже существующих событий)."""
-        count = self.events.count()
-        if count < len(self.STATUS_FLOW):
-            return self.STATUS_FLOW[count]
+        """
+        СТРОГИЙ порядок 1→2→3→4.
+        Прогресс считаем по наличию РУЧНЫХ статусов из STATUS_FLOW подряд с начала.
+        Шаг 3 у нас форматируется, поэтому сверяем startswith.
+        Автостатусы (actor IS NULL) игнорируем.
+        """
+        manual_texts = list(
+            self.events.filter(actor__isnull=False).values_list("status", flat=True)
+        )
+
+        def matches(flow_text: str, actual: str) -> bool:
+            # шаг 3 логирован в развернутом виде — сравнение по префиксу
+            if flow_text == "Прибыл в пункт выдачи":
+                return actual.startswith("Товар прибыл в пункт выдачи")
+            return actual == flow_text
+
+        # последовательно проверяем шаги с начала
+        progress = -1
+        for idx, flow_text in enumerate(self.STATUS_FLOW):
+            if any(matches(flow_text, t) for t in manual_texts):
+                progress = idx
+            else:
+                break
+
+        nxt_idx = progress + 1
+        if nxt_idx < len(self.STATUS_FLOW):
+            return self.STATUS_FLOW[nxt_idx]
         return None
 
     def can_scan(self) -> bool:
-        """Защита от случайного/частого скана: не чаще, чем раз в N минут."""
+        """Кулдаун считаем по последнему РУЧНОМУ скану."""
         cooldown_min = getattr(settings, "SCAN_COOLDOWN_MINUTES", 5)
-        last = self.last_event
+        last = self.last_manual_event
         if not last:
             return True
         return timezone.now() - last.timestamp >= timedelta(minutes=cooldown_min)
 
-    def apply_scan(self, location: str = ""):
-        """Добавить следующий статус по скану. Возвращает созданный TrackingEvent или None, если уже всё пройдено."""
-        # Проверка кулдауна
+    # ---------- Подстановки для статусов ----------
+    def _template_context(self, actor=None):
+        """
+        Контекст подстановок. Назначение берём из ПВЗ клиента (owner),
+        если его нет — из ПВЗ сотрудника, который сканирует.
+        """
+        pp = None
+        if getattr(self, "user", None) and getattr(self.user, "pickup_point", None):
+            pp = self.user.pickup_point
+        elif actor and getattr(actor, "pickup_point", None):
+            pp = actor.pickup_point
+
+        dest_city = getattr(pp, "name_ru", "") if pp else ""
+        dest_code = f"{getattr(pp, 'region_code', '')}-{getattr(pp, 'branch_code', '')}" if pp else ""
+        dest_addr = getattr(pp, "address", "") if pp else ""
+        dest_label = getattr(pp, "code_label", "") if pp else ""
+
+        return {
+            "pvz_name": dest_label or dest_city,  # "LIDER CARGO Ош" / "Бишкек"
+            "pvz_code": dest_code,                # "02-01"
+            "pvz_address": dest_addr,             # адрес ПВЗ
+            "track": self.tracking_number,
+            "dest_city": dest_city,               # для авто-текстов
+            "dest_label": dest_label,
+            "dest_code": dest_code,
+        }
+
+    def _render_text(self, template_text: str, actor=None) -> str:
+        """Безопасная подстановка плейсхолдеров {pvz_name}, {pvz_code}, {track}, {pvz_address}, {dest_city} ..."""
+        try:
+            return template_text.format(**self._template_context(actor=actor))
+        except Exception:
+            return template_text
+
+    def apply_scan(self, location: str = "", actor=None):
+        """
+        Добавить следующий статус по скану. Возвращает созданный TrackingEvent или None, если уже всё пройдено.
+        Если actor передан — требуем, чтобы он был сотрудником/админом.
+        """
+        if actor is not None:
+            if not (
+                getattr(actor, "is_employee", False)
+                or getattr(actor, "is_staff", False)
+                or getattr(actor, "is_superuser", False)
+            ):
+                raise PermissionError("Сканировать могут только сотрудники.")
+
+        # Проверка кулдауна по РУЧНОМУ событию
         if not self.can_scan():
             cooldown_min = getattr(settings, "SCAN_COOLDOWN_MINUTES", 5)
             raise ValueError(f"Скан возможен только через {cooldown_min} минут")
@@ -86,12 +165,64 @@ class Order(models.Model):
         if not nxt:
             return None  # уже «Получен»
 
-        return TrackingEvent.objects.create(
+        # Формируем текст: для шага 3 — как на макете
+        status_text = nxt
+        if nxt == "Прибыл в пункт выдачи":
+            status_text = self._render_text(
+                "Товар прибыл в пункт выдачи "
+                "[{pvz_name} {pvz_code}, трек-номер: {track}, адрес: {pvz_address}]",
+                actor=actor,
+            )
+
+        ev = TrackingEvent.objects.create(
             order=self,
-            status=nxt,
+            status=status_text,
             location=location or "",
+            actor=actor,  # фиксируем, кто сканировал (если передан)
         )
 
+        # «Досыпать» автостатусы, если их время уже пришло
+        self.create_due_auto_events(base_event=ev, actor=actor)
+
+        return ev
+
+    # ---------- Автоматические статусы по времени ----------
+    PHASE_BY_STATUS = {
+        "Товар поступил на склад в Китае": "AFTER_SCAN_1",
+        "Товар отправлен со склада": "AFTER_SCAN_2",
+        "Прибыл в пункт выдачи": "AFTER_SCAN_3",
+        "Получен": "AFTER_SCAN_4",
+    }
+
+    def create_due_auto_events(self, base_event: "TrackingEvent", actor=None):
+        """
+        «Ленивая» автодозагрузка: создаёт только те авто-события из шаблонов,
+        у которых (base_event.timestamp + offset) <= now и которых ещё нет у заказа.
+        """
+        phase = self.PHASE_BY_STATUS.get(base_event.status)
+        # если статус шага 3 был отформатирован, он начинается с "Товар прибыл в пункт выдачи"
+        if not phase and base_event.status.startswith("Товар прибыл в пункт выдачи"):
+            phase = "AFTER_SCAN_3"
+        if not phase:
+            return
+
+        templates = AutoStatusTemplate.objects.filter(phase=phase, is_active=True).order_by("order_index")
+
+        now = timezone.now()
+        exists_cache = set(self.events.values_list("status", flat=True))  # чтобы меньше бить БД
+
+        for tpl in templates:
+            due_ts = base_event.timestamp + timedelta(minutes=tpl.offset_minutes)
+            if due_ts <= now:
+                rendered = self._render_text(tpl.text, actor=actor)
+                if rendered not in exists_cache:
+                    TrackingEvent.objects.create(
+                        order=self,
+                        status=rendered,
+                        location="(авто)",
+                        timestamp=due_ts,  # важно: историческая отметка
+                    )
+                    exists_cache.add(rendered)
 
 # =========================
 #     Событие трекинга
@@ -109,6 +240,16 @@ class TrackingEvent(models.Model):
     status = models.CharField("Статус", max_length=255)
     location = models.CharField("Локация", max_length=255, blank=True)
     timestamp = models.DateTimeField(default=timezone.now)
+
+    # НОВОЕ: кто сделал скан (сотрудник/админ). Для автособытий остаётся NULL.
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="scans",
+        verbose_name="Сотрудник",
+    )
 
     class Meta:
         verbose_name = "Событие отслеживания"
@@ -190,8 +331,6 @@ class PickupPoint(models.Model):
             models.Index(fields=["region_code", "branch_code"]),
             models.Index(fields=["is_active"]),
         ]
-        # Не ставим уникальность на (region_code, branch_code),
-        # чтобы можно было иметь несколько ПВЗ в одном филиале.
 
     def __str__(self):
         return self.name_ru
@@ -228,11 +367,15 @@ class UserManager(BaseUserManager):
     def create_user(self, phone, password=None, **extra_fields):
         extra_fields.setdefault("is_staff", False)
         extra_fields.setdefault("is_superuser", False)
+        # по умолчанию — клиент, не сотрудник
+        extra_fields.setdefault("is_employee", False)
         return self._create_user(phone, password, **extra_fields)
 
     def create_superuser(self, phone, password, **extra_fields):
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
+        # суперюзеру включим флаг сотрудника — чтобы мог сканировать
+        extra_fields.setdefault("is_employee", True)
 
         # если ПВЗ не передали — выбираем/создаём дефолтный
         pp = extra_fields.get("pickup_point")
@@ -246,7 +389,7 @@ class UserManager(BaseUserManager):
                     code_label="Админ",
                     region_code="00",
                     branch_code="00",
-                    lc_prefix="ADM",  # дефолтный префикс для админского ПВЗ
+                    lc_prefix="ADM",
                     is_active=True,
                 )
             extra_fields["pickup_point"] = pp
@@ -294,11 +437,14 @@ class User(AbstractBaseUser, PermissionsMixin):
     client_code = models.CharField(
         "Личный код",
         max_length=64,
-        null=True,   # разрешаем NULL
-        blank=True,  # в формах можно оставить пустым
+        null=True,
+        blank=True,
     )
 
     region_code = models.CharField("Код региона (ручной ввод)", max_length=10, blank=True)
+
+    # НОВОЕ: флаг сотрудника (для права сканировать)
+    is_employee = models.BooleanField("Сотрудник", default=False)
 
     is_blocked = models.BooleanField("Заблокирован", default=False)
     is_active = models.BooleanField(default=True)
@@ -380,25 +526,64 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 
 # =========================
+#   Авто-статусы (шаблоны)
+# =========================
+class AutoStatusTemplate(models.Model):
+    """
+    Шаблоны автособытий, которые должны возникать ПОСЛЕ какого-то ручного скана.
+    Пример phase: "AFTER_SCAN_1", "AFTER_SCAN_2", "AFTER_SCAN_3", "AFTER_SCAN_4".
+    text — готовый текст статуса (можно с плейсхолдерами, если будете подставлять при создании).
+    offset_minutes — через сколько минут после базового события надо добавить этот статус.
+    """
+    phase = models.CharField("Фаза после скана", max_length=20)
+    order_index = models.PositiveSmallIntegerField(default=0)
+    text = models.CharField("Текст статуса", max_length=255)
+    offset_minutes = models.PositiveIntegerField("Смещение (минуты)", default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["phase", "order_index"]
+        indexes = [models.Index(fields=["phase", "is_active"])]
+
+    def __str__(self):
+        return f"{self.phase} #{self.order_index}: +{self.offset_minutes}m — {self.text[:40]}..."
+
+
+# =========================
 #   Утилита для сканера (атомарно)
 # =========================
-def handle_scan(tracking_number: str, *, location: str | None = None, user=None, description: str = "", raise_on_cooldown: bool = False):
+def handle_scan(
+    tracking_number: str,
+    *,
+    location: str | None = None,
+    user=None,
+    description: str = "",
+    raise_on_cooldown: bool = False
+):
     """
     Главная точка для сканера.
     - Если заказа нет — создаём и добавляем ШАГ 1.
     - Если заказ есть — добавляем следующий шаг из пайплайна.
     - Если уже «Получен» — вернёт (order, None).
     - Если не прошёл кулдаун — вернёт (order, None) или кинет ValueError (если raise_on_cooldown=True).
+    - Сканировать могут только авторизованные сотрудники/админы (но старый код без user мы не ломаем).
     """
-    tn = tracking_number.strip()
+    tn = (tracking_number or "").strip()
+
+    if user is not None:
+        if not (
+            getattr(user, "is_authenticated", False)
+            and (getattr(user, "is_employee", False) or getattr(user, "is_staff", False) or getattr(user, "is_superuser", False))
+        ):
+            raise PermissionError("Сканировать могут только авторизованные сотрудники.")
 
     with transaction.atomic():
         try:
-            # Лочим заказ по треку — защита от гонок при одновременных сканах
             order = Order.objects.select_for_update().get(tracking_number=tn)
             created = False
         except Order.DoesNotExist:
-            order = Order.objects.create(tracking_number=tn, user=user, description=description)
+            # ВАЖНО: не привязываем сотрудника как владельца заказа!
+            order = Order.objects.create(tracking_number=tn, description=description)
             created = True
 
         if not created and not order.can_scan():
@@ -407,5 +592,5 @@ def handle_scan(tracking_number: str, *, location: str | None = None, user=None,
                 raise ValueError(f"Повторный скан того же трека возможен через {cooldown_min} минут.")
             return order, None
 
-        event = order.apply_scan(location=location or "")
+        event = order.apply_scan(location=location or "", actor=user)
         return order, event
