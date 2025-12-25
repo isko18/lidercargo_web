@@ -247,38 +247,65 @@ class OrderFindAPIView(APIView):
 # =========================
 # NEW: Привязать заказ к себе
 # =========================
+CLIENT_CREATED_STATUS = "Ожидает поступления на склад в Китае"
+
 class OrderClaimAPIView(APIView):
-    """
-    POST /orders/claim/
-    body: {"tracking_number": "AB123"}
-    Привязывает заказ к текущему пользователю, если он свободен.
-    Если уже привязан к другому — 409.
-    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        tn = (request.data.get("tracking_number") or "").strip().upper()  # 👈 нормализация трека
+        tn = (request.data.get("tracking_number") or "").strip().upper()
         if not tn:
             return Response({"detail": "Укажите tracking_number."}, status=status.HTTP_400_BAD_REQUEST)
 
+        description = (request.data.get("description") or "").strip()
+
         with transaction.atomic():
-            try:
-                order = Order.objects.select_for_update().get(tracking_number=tn)
-            except Order.DoesNotExist:
-                return Response({"detail": "Трек не найден."}, status=status.HTTP_404_NOT_FOUND)
-
-            # если уже ваш — просто возвращаем
-            if order.user_id == request.user.id:
-                return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
-
-            # если свободен — привязываем
-            if order.user_id is None:
-                order.user = request.user
-                order.save(update_fields=["user"])
-                return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
-
-            # уже принадлежит кому-то другому
-            return Response(
-                {"detail": "Этот трек уже закреплён за другим пользователем."},
-                status=status.HTTP_409_CONFLICT,
+            order = (
+                Order.objects.select_for_update()
+                .filter(tracking_number=tn)
+                .first()
             )
+
+            created_now = False
+
+            if order is None:
+                # заказ отсутствует — создаём и сразу привязываем к текущему пользователю
+                try:
+                    order = Order.objects.create(
+                        tracking_number=tn,
+                        user=request.user,
+                        description=description,
+                    )
+                    created_now = True
+
+                    # 👇 добавляем авто-статус: клиент сам добавил
+                    TrackingEvent.objects.create(
+                        order=order,
+                        status=CLIENT_CREATED_STATUS,
+                        location="(клиент)",
+                        actor=None,  # важно: авто-событие, не ручной скан
+                    )
+
+                except IntegrityError:
+                    # гонка — кто-то создал параллельно; перелочим и продолжим как с существующим
+                    order = Order.objects.select_for_update().get(tracking_number=tn)
+
+            if not created_now:
+                if order.user_id == request.user.id:
+                    return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
+
+                if order.user_id is None:
+                    # свободен — привязываем к себе (без авто-события: заказ уже существовал)
+                    order.user = request.user
+                    if description and not order.description:
+                        order.description = description
+                    order.save(update_fields=["user", "description"])
+                    created_now = True
+                else:
+                    return Response(
+                        {"detail": "Этот трек уже закреплён за другим пользователем."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+        data = OrderSerializer(order).data
+        return Response(data, status=status.HTTP_201_CREATED if created_now else status.HTTP_200_OK)
