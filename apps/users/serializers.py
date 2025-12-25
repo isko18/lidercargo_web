@@ -11,7 +11,7 @@ from rest_framework.exceptions import AuthenticationFailed, ValidationError, Thr
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.utils import timezone
 
-from .models import PickupPoint, WarehouseCN, User, Order, TrackingEvent, handle_scan
+from .models import PickupPoint, WarehouseCN, User, Order, TrackingEvent, Base, handle_scan
 
 
 # -------------------------
@@ -365,3 +365,9 @@ class OrderScanSerializer(serializers.Serializer):
                 if instance["created_event"] else None
             ),
         }
+
+
+class BaseSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Base
+        fields = ("id", "logo", "banner")

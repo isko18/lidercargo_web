@@ -12,7 +12,7 @@ from django.db import transaction
 from datetime import timedelta
 from django.shortcuts import render
 
-from .models import PickupPoint, WarehouseCN, Order, TrackingEvent
+from .models import PickupPoint, WarehouseCN, Order, TrackingEvent, Base
 from .serializers import (
     RegisterSerializer,
     PickupPointSerializer,
@@ -23,6 +23,7 @@ from .serializers import (
     ProfileSerializer,
     OrderSerializer,
     OrderScanSerializer,
+    BaseSerializer
 )
 
 # 👇 НОВОЕ: подключаем пермишен
@@ -266,46 +267,7 @@ class OrderClaimAPIView(APIView):
                 .first()
             )
 
-            created_now = False
 
-            if order is None:
-                # заказ отсутствует — создаём и сразу привязываем к текущему пользователю
-                try:
-                    order = Order.objects.create(
-                        tracking_number=tn,
-                        user=request.user,
-                        description=description,
-                    )
-                    created_now = True
-
-                    # 👇 добавляем авто-статус: клиент сам добавил
-                    TrackingEvent.objects.create(
-                        order=order,
-                        status=CLIENT_CREATED_STATUS,
-                        location="(клиент)",
-                        actor=None,  # важно: авто-событие, не ручной скан
-                    )
-
-                except IntegrityError:
-                    # гонка — кто-то создал параллельно; перелочим и продолжим как с существующим
-                    order = Order.objects.select_for_update().get(tracking_number=tn)
-
-            if not created_now:
-                if order.user_id == request.user.id:
-                    return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
-
-                if order.user_id is None:
-                    # свободен — привязываем к себе (без авто-события: заказ уже существовал)
-                    order.user = request.user
-                    if description and not order.description:
-                        order.description = description
-                    order.save(update_fields=["user", "description"])
-                    created_now = True
-                else:
-                    return Response(
-                        {"detail": "Этот трек уже закреплён за другим пользователем."},
-                        status=status.HTTP_409_CONFLICT,
-                    )
-
-        data = OrderSerializer(order).data
-        return Response(data, status=status.HTTP_201_CREATED if created_now else status.HTTP_200_OK)
+class BaseList(generics.ListAPIView):
+    serializer_class = BaseSerializer
+    permission_classes = [AllowAny]
