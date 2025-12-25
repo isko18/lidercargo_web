@@ -9,6 +9,15 @@ from datetime import timedelta
 # =========================
 #        Заказ
 # =========================
+class Base(models.Model):
+    logo = models.ImageField(verbose_name="лого", upload_to="logo/")
+    banner = models.FileField(verbose_name="Баннер", upload_to="banner/")
+    
+    class Meta:
+        verbose_name = "Настройка"
+        verbose_name_plural = "Настройки"
+
+
 class Order(models.Model):
     """Заказ (посылка), привязанный к клиенту. Продвигается по сканам."""
 

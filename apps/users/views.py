@@ -12,7 +12,7 @@ from django.db import transaction
 from datetime import timedelta
 from django.shortcuts import render
 
-from .models import PickupPoint, WarehouseCN, Order, TrackingEvent
+from .models import PickupPoint, WarehouseCN, Order, TrackingEvent, Base
 from .serializers import (
     RegisterSerializer,
     PickupPointSerializer,
@@ -23,6 +23,7 @@ from .serializers import (
     ProfileSerializer,
     OrderSerializer,
     OrderScanSerializer,
+    BaseSerializer
 )
 
 # 👇 НОВОЕ: подключаем пермишен
@@ -282,3 +283,8 @@ class OrderClaimAPIView(APIView):
                 {"detail": "Этот трек уже закреплён за другим пользователем."},
                 status=status.HTTP_409_CONFLICT,
             )
+
+
+class BaseList(generics.ListAPIView):
+    serializer_class = BaseSerializer
+    permission_classes = [AllowAny]

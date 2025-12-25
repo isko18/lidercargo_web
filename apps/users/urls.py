@@ -15,6 +15,9 @@ urlpatterns = [
 
     # profile
     path("me/", MeAPIView.as_view(), name="me"),
+    path("base/", BaseList.as_view(), name="base"),
+    
+    
 
     # directories
     path("pickup-points/", PickupPointList.as_view(), name="pickuppoint-list"),
