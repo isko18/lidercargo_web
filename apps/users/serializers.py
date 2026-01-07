@@ -57,9 +57,9 @@ class RegisterSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-        password = attrs.get("password")
-        temp_user = User(phone=attrs.get("phone"), full_name=attrs.get("full_name"))
-        password_validation.validate_password(password=password, user=temp_user)
+    #     password = attrs.get("password")
+    #     temp_user = User(phone=attrs.get("phone"), full_name=attrs.get("full_name"))
+    #     password_validation.validate_password(password=password, user=temp_user)
         return attrs
 
     def create(self, validated_data):
@@ -169,7 +169,7 @@ class PasswordResetRequestSerializer(serializers.Serializer):
 class PasswordResetConfirmSerializer(serializers.Serializer):
     uid = serializers.CharField()
     token = serializers.CharField()
-    new_password = serializers.CharField(write_only=True, min_length=8)
+    new_password = serializers.CharField(write_only=True)  # убрали min_length
 
     def validate(self, attrs):
         try:
@@ -181,17 +181,9 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         if not default_token_generator.check_token(self.user, attrs["token"]):
             raise serializers.ValidationError("Неверный или просроченный токен.")
 
-        password_validation.validate_password(attrs["new_password"], user=self.user)
+        # ✅ убрали password_validation.validate_password(...)
         return attrs
 
-    def create(self, validated_data):
-        self.user.set_password(validated_data["new_password"])
-        self.user.save(update_fields=["password"])
-        self.instance = {"detail": "Пароль успешно обновлён."}
-        return self.instance
-
-    def to_representation(self, instance):
-        return instance
 
 
 # -------------------------
@@ -332,7 +324,7 @@ class OrderScanSerializer(serializers.Serializer):
     created_event = TrackingEventSerializer(read_only=True)
 
     def create(self, validated_data):
-        tn = validated_data["tracking_number"].strip()
+        tn = validated_data["tracking_number"].strip().upper()
         location = validated_data.get("location", "")
 
         # передаём текущего пользователя в handle_scan — он проверит, сотрудник ли это

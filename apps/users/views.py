@@ -248,6 +248,9 @@ class OrderFindAPIView(APIView):
 # =========================
 # NEW: Привязать заказ к себе
 # =========================
+# =========================
+# NEW: Привязать заказ к себе
+# =========================
 CLIENT_CREATED_STATUS = "Ожидает поступления на склад в Китае"
 
 class OrderClaimAPIView(APIView):
@@ -266,6 +269,44 @@ class OrderClaimAPIView(APIView):
                 .filter(tracking_number=tn)
                 .first()
             )
+
+            if not order:
+                return Response({"detail": "Трек не найден."}, status=status.HTTP_404_NOT_FOUND)
+
+            # Уже принадлежит текущему юзеру — это ок, можно вернуть 200
+            if order.user_id == request.user.id:
+                data = OrderSerializer(order).data
+                data.update({"claimed": True, "already_owned": True})
+                return Response(data, status=status.HTTP_200_OK)
+
+            # Уже принадлежит другому — конфликт
+            if order.user_id is not None and order.user_id != request.user.id:
+                return Response(
+                    {"detail": "Заказ уже привязан к другому пользователю."},
+                    status=status.HTTP_409_CONFLICT
+                )
+
+            # Привязываем к себе
+            order.user = request.user
+
+            # Если нужно: проставить/обновить статус при привязке
+            # ВАЖНО: замени "status" на реальное поле в твоей модели, если оно другое.
+            if hasattr(order, "status") and not (order.status or "").strip():
+                order.status = CLIENT_CREATED_STATUS
+
+            order.save()
+
+            # Если ты хочешь создавать событие в TrackingEvent при привязке — раскомментируй и адаптируй поля.
+            # TrackingEvent.objects.create(
+            #     order=order,
+            #     status=CLIENT_CREATED_STATUS,
+            #     description=description or "Заказ привязан клиентом",
+            # )
+
+        data = OrderSerializer(order).data
+        data.update({"claimed": True, "already_owned": False})
+        return Response(data, status=status.HTTP_200_OK)
+
 
 
 class BaseList(generics.ListAPIView):

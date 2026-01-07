@@ -1,40 +1,53 @@
-from django.db import models, transaction, IntegrityError
+from __future__ import annotations
+
+from datetime import timedelta
+
+from django.conf import settings
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.core.validators import RegexValidator
+from django.db import models, transaction, IntegrityError
 from django.utils import timezone
-from django.conf import settings
-from datetime import timedelta
 
 
 # =========================
-#        Заказ
+#        Настройки
 # =========================
 class Base(models.Model):
     logo = models.ImageField(verbose_name="лого", upload_to="logo/", null=True, blank=True)
     banner = models.FileField(verbose_name="Баннер", upload_to="banner/", null=True, blank=True)
-    
+
     class Meta:
         verbose_name = "Настройка"
         verbose_name_plural = "Настройки"
 
 
+# =========================
+#        Заказ
+# =========================
 class Order(models.Model):
-    """Заказ (посылка), привязанный к клиенту. Продвигается по сканам."""
+    """
+    Заказ (посылка), привязанный к клиенту.
+
+    НОВАЯ ЛОГИКА (как на фото):
+    - 2 ручных скана:
+      1) "Товар поступил на склад в Китае [LIDER CARGO]"
+         -> после него запускается авто-цепочка статусов (AFTER_SCAN_1)
+      2) "Товар прибыл в пункт выдачи [...]"
+         -> после него идут уведомления и через 14 дней авто-статус "Получен" (AFTER_SCAN_2)
+    """
 
     TRACK_NUMBER_MAX_LENGTH = 32
 
-    # Шаги обработки по порядку (4 ручных скана)
+    # 2 ручных скана
     STATUS_FLOW = [
         "Товар поступил на склад в Китае",
-        "Товар отправлен со склада",
         "Прибыл в пункт выдачи",
-        "Получен",
     ]
 
     id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,           # можно без клиента
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name="orders",
@@ -67,7 +80,7 @@ class Order(models.Model):
         ev = self.last_event
         return ev.status if ev else None
 
-    # >>> НОВОЕ: считаем только РУЧНЫЕ сканы <<<
+    # >>> считаем только РУЧНЫЕ сканы <<<
     @property
     def last_manual_event(self):
         """Последний РУЧНОЙ скан (actor не NULL)."""
@@ -75,28 +88,23 @@ class Order(models.Model):
 
     @property
     def manual_scan_count(self) -> int:
-        """Сколько ручных сканов уже сделано (для вычисления шага 1..4)."""
+        """Сколько ручных сканов уже сделано."""
         return self.events.filter(actor__isnull=False).count()
 
     @property
     def next_status(self):
         """
-        СТРОГИЙ порядок 1→2→3→4.
+        СТРОГИЙ порядок: 1 → 2 (две ручные точки).
         Прогресс считаем по наличию РУЧНЫХ статусов из STATUS_FLOW подряд с начала.
-        Шаг 3 у нас форматируется, поэтому сверяем startswith.
-        Автостатусы (actor IS NULL) игнорируем.
+        Скан #2 у нас форматированный ("Товар прибыл в пункт выдачи ..."), поэтому сверяем startswith.
         """
-        manual_texts = list(
-            self.events.filter(actor__isnull=False).values_list("status", flat=True)
-        )
+        manual_texts = list(self.events.filter(actor__isnull=False).values_list("status", flat=True))
 
         def matches(flow_text: str, actual: str) -> bool:
-            # шаг 3 логирован в развернутом виде — сравнение по префиксу
             if flow_text == "Прибыл в пункт выдачи":
                 return actual.startswith("Товар прибыл в пункт выдачи")
             return actual == flow_text
 
-        # последовательно проверяем шаги с начала
         progress = -1
         for idx, flow_text in enumerate(self.STATUS_FLOW):
             if any(matches(flow_text, t) for t in manual_texts):
@@ -120,8 +128,8 @@ class Order(models.Model):
     # ---------- Подстановки для статусов ----------
     def _template_context(self, actor=None):
         """
-        Контекст подстановок. Назначение берём из ПВЗ клиента (owner),
-        если его нет — из ПВЗ сотрудника, который сканирует.
+        Контекст подстановок.
+        Назначение берём из ПВЗ клиента (owner), если его нет — из ПВЗ сотрудника, который сканирует.
         """
         pp = None
         if getattr(self, "user", None) and getattr(self.user, "pickup_point", None):
@@ -139,7 +147,7 @@ class Order(models.Model):
             "pvz_code": dest_code,                # "02-01"
             "pvz_address": dest_addr,             # адрес ПВЗ
             "track": self.tracking_number,
-            "dest_city": dest_city,               # для авто-текстов
+            "dest_city": dest_city,
             "dest_label": dest_label,
             "dest_code": dest_code,
         }
@@ -151,10 +159,17 @@ class Order(models.Model):
         except Exception:
             return template_text
 
+    # ---------- Автоматические статусы по времени ----------
+    PHASE_BY_STATUS = {
+        "Товар поступил на склад в Китае [LIDER CARGO]": "AFTER_SCAN_1",
+        "Товар поступил на склад в Китае": "AFTER_SCAN_1",  # на всякий случай
+        "Прибыл в пункт выдачи": "AFTER_SCAN_2",
+    }
+
     def apply_scan(self, location: str = "", actor=None):
         """
-        Добавить следующий статус по скану. Возвращает созданный TrackingEvent или None, если уже всё пройдено.
-        Если actor передан — требуем, чтобы он был сотрудником/админом.
+        Добавить следующий ручной статус по скану.
+        Возвращает созданный TrackingEvent или None, если оба ручных скана уже сделаны.
         """
         if actor is not None:
             if not (
@@ -164,18 +179,20 @@ class Order(models.Model):
             ):
                 raise PermissionError("Сканировать могут только сотрудники.")
 
-        # Проверка кулдауна по РУЧНОМУ событию
         if not self.can_scan():
             cooldown_min = getattr(settings, "SCAN_COOLDOWN_MINUTES", 5)
             raise ValueError(f"Скан возможен только через {cooldown_min} минут")
 
-        # Определяем следующий статус
         nxt = self.next_status
         if not nxt:
-            return None  # уже «Получен»
+            return None  # уже пройдены оба ручных скана
 
-        # Формируем текст: для шага 3 — как на макете
+        # 1) Скан #1 — как на фото
         status_text = nxt
+        if nxt == "Товар поступил на склад в Китае":
+            status_text = "Товар поступил на склад в Китае [LIDER CARGO]"
+
+        # 2) Скан #2 — прибыл в ПВЗ (форматированный текст)
         if nxt == "Прибыл в пункт выдачи":
             status_text = self._render_text(
                 "Товар прибыл в пункт выдачи "
@@ -187,38 +204,33 @@ class Order(models.Model):
             order=self,
             status=status_text,
             location=location or "",
-            actor=actor,  # фиксируем, кто сканировал (если передан)
+            actor=actor,
         )
 
         # «Досыпать» автостатусы, если их время уже пришло
         self.create_due_auto_events(base_event=ev, actor=actor)
-
         return ev
-
-    # ---------- Автоматические статусы по времени ----------
-    PHASE_BY_STATUS = {
-        "Товар поступил на склад в Китае": "AFTER_SCAN_1",
-        "Товар отправлен со склада": "AFTER_SCAN_2",
-        "Прибыл в пункт выдачи": "AFTER_SCAN_3",
-        "Получен": "AFTER_SCAN_4",
-    }
 
     def create_due_auto_events(self, base_event: "TrackingEvent", actor=None):
         """
-        «Ленивая» автодозагрузка: создаёт только те авто-события из шаблонов,
+        «Ленивая» автодозагрузка: создаёт только те авто-события,
         у которых (base_event.timestamp + offset) <= now и которых ещё нет у заказа.
         """
         phase = self.PHASE_BY_STATUS.get(base_event.status)
-        # если статус шага 3 был отформатирован, он начинается с "Товар прибыл в пункт выдачи"
+
+        # если скан #2 форматированный — фаза AFTER_SCAN_2
         if not phase and base_event.status.startswith("Товар прибыл в пункт выдачи"):
-            phase = "AFTER_SCAN_3"
+            phase = "AFTER_SCAN_2"
+
         if not phase:
             return
 
-        templates = AutoStatusTemplate.objects.filter(phase=phase, is_active=True).order_by("order_index")
+        templates = AutoStatusTemplate.objects.filter(
+            phase=phase, is_active=True
+        ).order_by("order_index")
 
         now = timezone.now()
-        exists_cache = set(self.events.values_list("status", flat=True))  # чтобы меньше бить БД
+        exists_cache = set(self.events.values_list("status", flat=True))
 
         for tpl in templates:
             due_ts = base_event.timestamp + timedelta(minutes=tpl.offset_minutes)
@@ -229,9 +241,10 @@ class Order(models.Model):
                         order=self,
                         status=rendered,
                         location="(авто)",
-                        timestamp=due_ts,  # важно: историческая отметка
+                        timestamp=due_ts,
                     )
                     exists_cache.add(rendered)
+
 
 # =========================
 #     Событие трекинга
@@ -250,7 +263,7 @@ class TrackingEvent(models.Model):
     location = models.CharField("Локация", max_length=255, blank=True)
     timestamp = models.DateTimeField(default=timezone.now)
 
-    # НОВОЕ: кто сделал скан (сотрудник/админ). Для автособытий остаётся NULL.
+    # кто сделал ручной скан (для автособытий остаётся NULL)
     actor = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -267,6 +280,24 @@ class TrackingEvent(models.Model):
 
     def __str__(self):
         return f"[{self.timestamp:%Y-%m-%d %H:%M}] {self.status}"
+
+
+# =========================
+#   Авто-статусы (шаблоны)
+# =========================
+class AutoStatusTemplate(models.Model):
+    phase = models.CharField("Фаза после скана", max_length=20)
+    order_index = models.PositiveSmallIntegerField(default=0)
+    text = models.CharField("Текст статуса", max_length=255)
+    offset_minutes = models.PositiveIntegerField("Смещение (минуты)", default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["phase", "order_index"]
+        indexes = [models.Index(fields=["phase", "is_active"])]
+
+    def __str__(self):
+        return f"{self.phase} #{self.order_index}: +{self.offset_minutes}m — {self.text[:40]}..."
 
 
 # =========================
@@ -311,7 +342,6 @@ class PickupPoint(models.Model):
     region_code = models.CharField("Код региона", max_length=2, validators=[DIG2])
     branch_code = models.CharField("Код филиала", max_length=2, validators=[DIG2])
 
-    # Префикс для LC на уровне ПВЗ (например: "OS", "BS" и т.п.)
     lc_prefix = models.CharField(
         "Префикс LC для ПВЗ",
         max_length=10,
@@ -365,28 +395,23 @@ class UserManager(BaseUserManager):
         user = self.model(phone=phone, **extra_fields)
         user.set_password(password)
 
-        # Сначала генерируем client_code (если его нет)
         if not user.client_code:
             user.assign_client_code(save=False)
 
-        # Сохраняем один раз — уже с client_code
         user.save(using=self._db)
         return user
 
     def create_user(self, phone, password=None, **extra_fields):
         extra_fields.setdefault("is_staff", False)
         extra_fields.setdefault("is_superuser", False)
-        # по умолчанию — клиент, не сотрудник
         extra_fields.setdefault("is_employee", False)
         return self._create_user(phone, password, **extra_fields)
 
     def create_superuser(self, phone, password, **extra_fields):
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
-        # суперюзеру включим флаг сотрудника — чтобы мог сканировать
         extra_fields.setdefault("is_employee", True)
 
-        # если ПВЗ не передали — выбираем/создаём дефолтный
         pp = extra_fields.get("pickup_point")
         if pp is None:
             pp = PickupPoint.objects.filter(is_active=True).first()
@@ -452,7 +477,6 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     region_code = models.CharField("Код региона (ручной ввод)", max_length=10, blank=True)
 
-    # НОВОЕ: флаг сотрудника (для права сканировать)
     is_employee = models.BooleanField("Сотрудник", default=False)
 
     is_blocked = models.BooleanField("Заблокирован", default=False)
@@ -475,7 +499,6 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return f"{self.full_name} ({self.phone})"
 
-    # -------- Представления --------
     @property
     def client_code_display(self) -> str:
         pp = self.pickup_point
@@ -500,7 +523,6 @@ class User(AbstractBaseUser, PermissionsMixin):
         parts = [base, tail, contact]
         return " ".join(p for p in parts if p)
 
-    # -------- Генерация client_code --------
     def assign_client_code(self, save=True):
         pp = self.pickup_point
         base_code = f"{pp.code_label}-{self.region_code or pp.region_code}-{pp.branch_code}"
@@ -524,7 +546,6 @@ class User(AbstractBaseUser, PermissionsMixin):
                                 self.save(update_fields=["client_code", "lc_number", "updated_at"])
                         break
                     except IntegrityError:
-                        # гонка — пробуем следующий номер
                         continue
         else:
             self.client_code = f"{base_code}({pp.lc_prefix}-{self.lc_number})"
@@ -532,30 +553,6 @@ class User(AbstractBaseUser, PermissionsMixin):
                 self.save(update_fields=["client_code", "lc_number", "updated_at"])
 
         return self.client_code
-
-
-# =========================
-#   Авто-статусы (шаблоны)
-# =========================
-class AutoStatusTemplate(models.Model):
-    """
-    Шаблоны автособытий, которые должны возникать ПОСЛЕ какого-то ручного скана.
-    Пример phase: "AFTER_SCAN_1", "AFTER_SCAN_2", "AFTER_SCAN_3", "AFTER_SCAN_4".
-    text — готовый текст статуса (можно с плейсхолдерами, если будете подставлять при создании).
-    offset_minutes — через сколько минут после базового события надо добавить этот статус.
-    """
-    phase = models.CharField("Фаза после скана", max_length=20)
-    order_index = models.PositiveSmallIntegerField(default=0)
-    text = models.CharField("Текст статуса", max_length=255)
-    offset_minutes = models.PositiveIntegerField("Смещение (минуты)", default=0)
-    is_active = models.BooleanField(default=True)
-
-    class Meta:
-        ordering = ["phase", "order_index"]
-        indexes = [models.Index(fields=["phase", "is_active"])]
-
-    def __str__(self):
-        return f"{self.phase} #{self.order_index}: +{self.offset_minutes}m — {self.text[:40]}..."
 
 
 # =========================
@@ -570,19 +567,21 @@ def handle_scan(
     raise_on_cooldown: bool = False
 ):
     """
-    Главная точка для сканера.
-    - Если заказа нет — создаём и добавляем ШАГ 1.
-    - Если заказ есть — добавляем следующий шаг из пайплайна.
-    - Если уже «Получен» — вернёт (order, None).
-    - Если не прошёл кулдаун — вернёт (order, None) или кинет ValueError (если raise_on_cooldown=True).
-    - Сканировать могут только авторизованные сотрудники/админы (но старый код без user мы не ломаем).
+    - Если заказа нет — создаём и добавляем СКАН #1.
+    - Если заказ есть — добавляем следующий ручной шаг (СКАН #2).
+    - Если оба ручных уже пройдены — вернёт (order, None).
+    - Кулдаун — по последнему ручному скану.
     """
     tn = (tracking_number or "").strip()
 
     if user is not None:
         if not (
             getattr(user, "is_authenticated", False)
-            and (getattr(user, "is_employee", False) or getattr(user, "is_staff", False) or getattr(user, "is_superuser", False))
+            and (
+                getattr(user, "is_employee", False)
+                or getattr(user, "is_staff", False)
+                or getattr(user, "is_superuser", False)
+            )
         ):
             raise PermissionError("Сканировать могут только авторизованные сотрудники.")
 
@@ -591,7 +590,6 @@ def handle_scan(
             order = Order.objects.select_for_update().get(tracking_number=tn)
             created = False
         except Order.DoesNotExist:
-            # ВАЖНО: не привязываем сотрудника как владельца заказа!
             order = Order.objects.create(tracking_number=tn, description=description)
             created = True
 
