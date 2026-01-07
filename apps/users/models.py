@@ -10,8 +10,8 @@ from datetime import timedelta
 #        Заказ
 # =========================
 class Base(models.Model):
-    logo = models.ImageField(verbose_name="лого", upload_to="logo/")
-    banner = models.FileField(verbose_name="Баннер", upload_to="banner/")
+    logo = models.ImageField(verbose_name="лого", upload_to="logo/", null=True, blank=True)
+    banner = models.FileField(verbose_name="Баннер", upload_to="banner/", null=True, blank=True)
     
     class Meta:
         verbose_name = "Настройка"

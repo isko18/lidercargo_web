@@ -370,4 +370,4 @@ class OrderScanSerializer(serializers.Serializer):
 class BaseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Base
-        fields = ("id", "logo", "banner")
+        fields = ("id", "logo","banner",)

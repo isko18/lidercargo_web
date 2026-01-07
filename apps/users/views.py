@@ -271,3 +271,5 @@ class OrderClaimAPIView(APIView):
 class BaseList(generics.ListAPIView):
     serializer_class = BaseSerializer
     permission_classes = [AllowAny]
+    
+    queryset = Base.objects.all()

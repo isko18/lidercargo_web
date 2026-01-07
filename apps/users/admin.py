@@ -1,5 +1,8 @@
 from django.contrib import admin
-from .models import User, PickupPoint, WarehouseCN, ClientCodeCounter, Order, TrackingEvent, AutoStatusTemplate
+from .models import User, PickupPoint, WarehouseCN, ClientCodeCounter, Order, TrackingEvent, AutoStatusTemplate, Base
+
+
+admin.site.register(Base)
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
