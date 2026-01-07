@@ -8,7 +8,7 @@ from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, Bl
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.db.models import Prefetch
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from datetime import timedelta
 from django.shortcuts import render
 
@@ -244,14 +244,8 @@ class OrderFindAPIView(APIView):
         data.update({"is_owner": is_owner, "can_claim": can_claim})
         return Response(data, status=status.HTTP_200_OK)
 
-
-# =========================
-# NEW: Привязать заказ к себе
-# =========================
-# =========================
-# NEW: Привязать заказ к себе
-# =========================
 CLIENT_CREATED_STATUS = "Ожидает поступления на склад в Китае"
+
 
 class OrderClaimAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -270,43 +264,50 @@ class OrderClaimAPIView(APIView):
                 .first()
             )
 
+            # 1️⃣ Если заказа нет — создаём
             if not order:
-                return Response({"detail": "Трек не найден."}, status=status.HTTP_404_NOT_FOUND)
+                try:
+                    order = Order.objects.create(
+                        tracking_number=tn,
+                        description=description,
+                        user=request.user,
+                    )
+                except IntegrityError:
+                    order = (
+                        Order.objects.select_for_update()
+                        .filter(tracking_number=tn)
+                        .first()
+                    )
 
-            # Уже принадлежит текущему юзеру — это ок, можно вернуть 200
-            if order.user_id == request.user.id:
-                data = OrderSerializer(order).data
-                data.update({"claimed": True, "already_owned": True})
-                return Response(data, status=status.HTTP_200_OK)
-
-            # Уже принадлежит другому — конфликт
-            if order.user_id is not None and order.user_id != request.user.id:
+            # 2️⃣ Если уже привязан к другому — запрет
+            if order.user_id and order.user_id != request.user.id:
                 return Response(
                     {"detail": "Заказ уже привязан к другому пользователю."},
                     status=status.HTTP_409_CONFLICT
                 )
 
-            # Привязываем к себе
+            # 3️⃣ Привязываем к текущему пользователю
             order.user = request.user
+            if description and not order.description:
+                order.description = description
+            order.save(update_fields=["user", "description"])
 
-            # Если нужно: проставить/обновить статус при привязке
-            # ВАЖНО: замени "status" на реальное поле в твоей модели, если оно другое.
-            if hasattr(order, "status") and not (order.status or "").strip():
-                order.status = CLIENT_CREATED_STATUS
+            # 4️⃣ ГАРАНТИЯ стартового статуса
+            has_start_status = order.events.filter(
+                status=CLIENT_CREATED_STATUS
+            ).exists()
 
-            order.save()
-
-            # Если ты хочешь создавать событие в TrackingEvent при привязке — раскомментируй и адаптируй поля.
-            # TrackingEvent.objects.create(
-            #     order=order,
-            #     status=CLIENT_CREATED_STATUS,
-            #     description=description or "Заказ привязан клиентом",
-            # )
+            if not has_start_status:
+                TrackingEvent.objects.create(
+                    order=order,
+                    status=CLIENT_CREATED_STATUS,
+                    location="(клиент)",
+                    actor=None,  # ❗ авто-статус
+                )
 
         data = OrderSerializer(order).data
-        data.update({"claimed": True, "already_owned": False})
+        data.update({"claimed": True})
         return Response(data, status=status.HTTP_200_OK)
-
 
 
 class BaseList(generics.ListAPIView):
