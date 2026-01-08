@@ -264,7 +264,9 @@ class OrderClaimAPIView(APIView):
                 .first()
             )
 
-            # 1️⃣ Если заказа нет — создаём
+            created_now = False
+
+            # 1) Если заказа нет — создаём (и только тогда ставим стартовый статус)
             if not order:
                 try:
                     order = Order.objects.create(
@@ -272,41 +274,45 @@ class OrderClaimAPIView(APIView):
                         description=description,
                         user=request.user,
                     )
+                    created_now = True
                 except IntegrityError:
                     order = (
                         Order.objects.select_for_update()
                         .filter(tracking_number=tn)
                         .first()
                     )
+                    created_now = False
 
-            # 2️⃣ Если уже привязан к другому — запрет
+            if not order:
+                return Response({"detail": "Не удалось создать/найти заказ."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            # 2) Если уже привязан к другому — запрет
             if order.user_id and order.user_id != request.user.id:
                 return Response(
                     {"detail": "Заказ уже привязан к другому пользователю."},
                     status=status.HTTP_409_CONFLICT
                 )
 
-            # 3️⃣ Привязываем к текущему пользователю
+            # 3) Присваиваем заказ текущему пользователю (статусы НЕ трогаем)
             order.user = request.user
-            if description and not order.description:
+            if created_now and description:
+                # описание логично сохранять при создании
                 order.description = description
-            order.save(update_fields=["user", "description"])
+                order.save(update_fields=["user", "description"])
+            else:
+                order.save(update_fields=["user"])
 
-            # 4️⃣ ГАРАНТИЯ стартового статуса
-            has_start_status = order.events.filter(
-                status=CLIENT_CREATED_STATUS
-            ).exists()
-
-            if not has_start_status:
+            # 4) Стартовый статус создаём ТОЛЬКО если трек был создан сейчас
+            if created_now:
                 TrackingEvent.objects.create(
                     order=order,
                     status=CLIENT_CREATED_STATUS,
                     location="(клиент)",
-                    actor=None,  # ❗ авто-статус
+                    actor=None,
                 )
 
         data = OrderSerializer(order).data
-        data.update({"claimed": True})
+        data.update({"claimed": True, "created": created_now})
         return Response(data, status=status.HTTP_200_OK)
 
 
