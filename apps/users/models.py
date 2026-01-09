@@ -28,7 +28,6 @@ class Order(models.Model):
     """
     Заказ (посылка), привязанный к клиенту.
 
-    НОВАЯ ЛОГИКА (как на фото):
     - 2 ручных скана:
       1) "Товар поступил на склад в Китае [LIDER CARGO]"
          -> после него запускается авто-цепочка статусов (AFTER_SCAN_1)
@@ -38,7 +37,6 @@ class Order(models.Model):
 
     TRACK_NUMBER_MAX_LENGTH = 32
 
-    # 2 ручных скана
     STATUS_FLOW = [
         "Товар поступил на склад в Китае",
         "Прибыл в пункт выдачи",
@@ -70,7 +68,6 @@ class Order(models.Model):
     def __str__(self):
         return f"{self.tracking_number} ({getattr(self.user, 'full_name', 'без клиента')})"
 
-    # ---------- Вспомогательные ----------
     @property
     def last_event(self):
         return self.events.order_by("-timestamp").first()
@@ -80,7 +77,6 @@ class Order(models.Model):
         ev = self.last_event
         return ev.status if ev else None
 
-    # >>> считаем только РУЧНЫЕ сканы <<<
     @property
     def last_manual_event(self):
         """Последний РУЧНОЙ скан (actor не NULL)."""
@@ -125,7 +121,6 @@ class Order(models.Model):
             return True
         return timezone.now() - last.timestamp >= timedelta(minutes=cooldown_min)
 
-    # ---------- Подстановки для статусов ----------
     def _template_context(self, actor=None):
         """
         Контекст подстановок.
@@ -143,9 +138,9 @@ class Order(models.Model):
         dest_label = getattr(pp, "code_label", "") if pp else ""
 
         return {
-            "pvz_name": dest_label or dest_city,  # "LIDER CARGO Ош" / "Бишкек"
-            "pvz_code": dest_code,                # "02-01"
-            "pvz_address": dest_addr,             # адрес ПВЗ
+            "pvz_name": dest_label or dest_city,
+            "pvz_code": dest_code,
+            "pvz_address": dest_addr,
             "track": self.tracking_number,
             "dest_city": dest_city,
             "dest_label": dest_label,
@@ -153,24 +148,18 @@ class Order(models.Model):
         }
 
     def _render_text(self, template_text: str, actor=None) -> str:
-        """Безопасная подстановка плейсхолдеров {pvz_name}, {pvz_code}, {track}, {pvz_address}, {dest_city} ..."""
         try:
             return template_text.format(**self._template_context(actor=actor))
         except Exception:
             return template_text
 
-    # ---------- Автоматические статусы по времени ----------
     PHASE_BY_STATUS = {
         "Товар поступил на склад в Китае [LIDER CARGO]": "AFTER_SCAN_1",
-        "Товар поступил на склад в Китае": "AFTER_SCAN_1",  # на всякий случай
-        "Прибыл в пункт выдачи": "AFTER_SCAN_2",
+        "Товар поступил на склад в Китае": "AFTER_SCAN_1",
+        # "Прибыл в пункт выдачи": "AFTER_SCAN_2",  # этот ключ фактически не используется (у тебя форматированный текст)
     }
 
     def apply_scan(self, location: str = "", actor=None):
-        """
-        Добавить следующий ручной статус по скану.
-        Возвращает созданный TrackingEvent или None, если оба ручных скана уже сделаны.
-        """
         if actor is not None:
             if not (
                 getattr(actor, "is_employee", False)
@@ -185,14 +174,12 @@ class Order(models.Model):
 
         nxt = self.next_status
         if not nxt:
-            return None  # уже пройдены оба ручных скана
+            return None
 
-        # 1) Скан #1 — как на фото
         status_text = nxt
         if nxt == "Товар поступил на склад в Китае":
             status_text = "Товар поступил на склад в Китае [LIDER CARGO]"
 
-        # 2) Скан #2 — прибыл в ПВЗ (форматированный текст)
         if nxt == "Прибыл в пункт выдачи":
             status_text = self._render_text(
                 "Товар прибыл в пункт выдачи "
@@ -207,27 +194,19 @@ class Order(models.Model):
             actor=actor,
         )
 
-        # «Досыпать» автостатусы, если их время уже пришло
         self.create_due_auto_events(base_event=ev, actor=actor)
         return ev
 
     def create_due_auto_events(self, base_event: "TrackingEvent", actor=None):
-        """
-        «Ленивая» автодозагрузка: создаёт только те авто-события,
-        у которых (base_event.timestamp + offset) <= now и которых ещё нет у заказа.
-        """
         phase = self.PHASE_BY_STATUS.get(base_event.status)
 
-        # если скан #2 форматированный — фаза AFTER_SCAN_2
         if not phase and base_event.status.startswith("Товар прибыл в пункт выдачи"):
             phase = "AFTER_SCAN_2"
 
         if not phase:
             return
 
-        templates = AutoStatusTemplate.objects.filter(
-            phase=phase, is_active=True
-        ).order_by("order_index")
+        templates = AutoStatusTemplate.objects.filter(phase=phase, is_active=True).order_by("order_index")
 
         now = timezone.now()
         exists_cache = set(self.events.values_list("status", flat=True))
@@ -250,8 +229,6 @@ class Order(models.Model):
 #     Событие трекинга
 # =========================
 class TrackingEvent(models.Model):
-    """История сканирований/статусов по заказу."""
-
     id = models.BigAutoField(primary_key=True)
     order = models.ForeignKey(
         Order,
@@ -263,7 +240,6 @@ class TrackingEvent(models.Model):
     location = models.CharField("Локация", max_length=255, blank=True)
     timestamp = models.DateTimeField(default=timezone.now)
 
-    # кто сделал ручной скан (для автособытий остаётся NULL)
     actor = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -321,26 +297,27 @@ class WarehouseCN(models.Model):
         return self.name or self.address_cn
 
 
-# двузначный код: "01", "02", ...
+# валидаторы
 DIG2 = RegexValidator(r"^\d{2}$", 'Требуется двузначный код, например "01".')
+DIG_1_4 = RegexValidator(r"^\d{1,4}$", 'Код филиала: 1–4 цифры, например "155" или "0155".')
 
 
 # =========================
 #        ПВЗ
 # =========================
 class PickupPoint(models.Model):
-    name_ru = models.CharField("Название (RU)", max_length=80)  # Бишкек, Ош, ...
+    name_ru = models.CharField("Название (RU)", max_length=80)
     name_kg = models.CharField("Аталышы (KG)", max_length=80, blank=True)
     address = models.CharField("Адрес (локальный)", max_length=255, blank=True)
 
     code_label = models.CharField(
         "Метка для клиентского кода",
         max_length=80,
-        help_text="Что попадёт в префикс кода, например «Бишкек» или «Ош»",
+        help_text="Можно оставить для админки/вывески (в личный код больше не входит).",
     )
 
     region_code = models.CharField("Код региона", max_length=2, validators=[DIG2])
-    branch_code = models.CharField("Код филиала", max_length=2, validators=[DIG2])
+    branch_code = models.CharField("Код филиала", max_length=4, validators=[DIG_1_4])
 
     lc_prefix = models.CharField(
         "Префикс LC для ПВЗ",
@@ -391,10 +368,11 @@ class UserManager(BaseUserManager):
         if not password:
             raise ValueError("Пароль обязателен")
 
-        phone = phone.replace(" ", "")
+        phone = (phone or "").replace(" ", "").strip()
         user = self.model(phone=phone, **extra_fields)
         user.set_password(password)
 
+        # генерим lc/client_code до сохранения — это ОК, потому что формат не зависит от user.id
         if not user.client_code:
             user.assign_client_code(save=False)
 
@@ -422,7 +400,7 @@ class UserManager(BaseUserManager):
                     address="",
                     code_label="Админ",
                     region_code="00",
-                    branch_code="00",
+                    branch_code="0",
                     lc_prefix="ADM",
                     is_active=True,
                 )
@@ -475,7 +453,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         blank=True,
     )
 
-    region_code = models.CharField("Код региона (ручной ввод)", max_length=10, blank=True)
+    # ✅ УДАЛЕНО: region_code (ручной ввод)
+    # region_code = models.CharField("Код региона (ручной ввод)", max_length=10, blank=True)
 
     is_employee = models.BooleanField("Сотрудник", default=False)
 
@@ -499,15 +478,20 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return f"{self.full_name} ({self.phone})"
 
+    @staticmethod
+    def _branch_left(branch_code: str) -> str:
+        s = (branch_code or "").strip()
+        if not s:
+            return "0"
+        # "0155" -> "155"
+        s2 = s.lstrip("0")
+        return s2 if s2 else "0"
+
     @property
     def client_code_display(self) -> str:
         pp = self.pickup_point
-        return (
-            f"{pp.code_label}-"
-            f"{self.region_code or pp.region_code}-"
-            f"{pp.branch_code}"
-            f"({pp.lc_prefix}-{self.lc_number})"
-        )
+        left = self._branch_left(pp.branch_code)  # ✅ 155
+        return f"{left}({pp.lc_prefix}-{self.lc_number})"
 
     def get_cn_warehouse(self):
         return self.pickup_point.default_cn_warehouse
@@ -524,8 +508,14 @@ class User(AbstractBaseUser, PermissionsMixin):
         return " ".join(p for p in parts if p)
 
     def assign_client_code(self, save=True):
+        """
+        ✅ Новый формат личного кода:
+        155(BS-0241)
+        где 155 = branch_code без ведущих нулей.
+        """
         pp = self.pickup_point
-        base_code = f"{pp.code_label}-{self.region_code or pp.region_code}-{pp.branch_code}"
+        left = self._branch_left(pp.branch_code)
+        base_code = left
 
         if not self.lc_number:
             counter, _ = ClientCodeCounter.objects.get_or_create(pickup_point=pp)
@@ -572,7 +562,7 @@ def handle_scan(
     - Если оба ручных уже пройдены — вернёт (order, None).
     - Кулдаун — по последнему ручному скану.
     """
-    tn = (tracking_number or "").strip()
+    tn = "".join((tracking_number or "").split()).strip().upper()
 
     if user is not None:
         if not (

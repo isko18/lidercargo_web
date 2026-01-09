@@ -1,17 +1,25 @@
 # serializers.py
 from django.conf import settings
-from django.contrib.auth import password_validation
 from django.core.mail import send_mail
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
-
-from rest_framework import serializers
-from rest_framework.exceptions import AuthenticationFailed, ValidationError, Throttled, PermissionDenied
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.utils import timezone
 
+from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed, Throttled, PermissionDenied
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+
 from .models import PickupPoint, WarehouseCN, User, Order, TrackingEvent, Base, handle_scan
+
+
+def norm_phone(v: str) -> str:
+    return (v or "").replace(" ", "").strip()
+
+
+def norm_track(v: str) -> str:
+    s = (v or "").strip().upper()
+    return "".join(s.split())
 
 
 # -------------------------
@@ -26,9 +34,8 @@ class RegisterSerializer(serializers.ModelSerializer):
     client_code = serializers.CharField(read_only=True)
     cn_warehouse_address = serializers.SerializerMethodField(read_only=True)
 
-    # опциональные ручные поля
+    # опциональное ручное поле
     lc_number = serializers.CharField(required=False, allow_blank=True)
-    region_code = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = User
@@ -39,14 +46,13 @@ class RegisterSerializer(serializers.ModelSerializer):
             "pickup_point_id",
             "password",
             "lc_number",
-            "region_code",
             "client_code",
             "cn_warehouse_address",
         )
         extra_kwargs = {"password": {"write_only": True}}
 
     def validate_phone(self, value: str) -> str:
-        return value.replace(" ", "")
+        return norm_phone(value)
 
     def validate_email(self, value):
         if not value:
@@ -57,9 +63,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-    #     password = attrs.get("password")
-    #     temp_user = User(phone=attrs.get("phone"), full_name=attrs.get("full_name"))
-    #     password_validation.validate_password(password=password, user=temp_user)
+        # password_validation убран сознательно (как у тебя было)
         return attrs
 
     def create(self, validated_data):
@@ -88,13 +92,13 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token["client_code"] = user.client_code
         token["pvz_id"] = user.pickup_point_id
         token["pvz_region"] = user.pickup_point.region_code
-        token["pvz_branch"] = user.pickup_point.branch_code
+        token["pvz_branch"] = user.pickup_point.branch_code  # может быть "0155", display делается на бэке
         token["pvz_lc_prefix"] = user.pickup_point.lc_prefix
-        token["is_employee"] = user.is_employee  # новое
+        token["is_employee"] = user.is_employee
         return token
 
     def validate(self, attrs):
-        data = super().validate(attrs)  # access/refresh + self.user
+        data = super().validate(attrs)
 
         if not self.user.is_active or getattr(self.user, "is_blocked", False):
             raise AuthenticationFailed("Пользователь заблокирован или неактивен.")
@@ -108,7 +112,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             "full_name": self.user.full_name,
             "phone": self.user.phone,
             "client_code": self.user.client_code,
-            "client_code_display": self.user.client_code_display,
+            "client_code_display": self.user.client_code_display,  # ✅ будет 155(BS-0241)
             "pickup_point": {
                 "id": pvz.id,
                 "name_ru": pvz.name_ru,
@@ -119,7 +123,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             },
             "cn_warehouse_address": self.user.cn_warehouse_address,
             "is_staff": self.user.is_staff,
-            "is_employee": self.user.is_employee,  # новое
+            "is_employee": self.user.is_employee,
         }
         return data
 
@@ -140,7 +144,11 @@ class PasswordResetRequestSerializer(serializers.Serializer):
 
         uid = urlsafe_base64_encode(force_bytes(user.pk))
         token = default_token_generator.make_token(user)
-        base = getattr(settings, "PASSWORD_RESET_FRONTEND_URL", "https://lidercargo.kg/v1/api/users/auth/password-reset/confirm/")
+        base = getattr(
+            settings,
+            "PASSWORD_RESET_FRONTEND_URL",
+            "https://lidercargo.kg/v1/api/users/auth/password-reset/confirm/",
+        )
         reset_link = f"{base}?uid={uid}&token={token}"
 
         subject = "Сброс пароля LIDER CARGO"
@@ -169,7 +177,7 @@ class PasswordResetRequestSerializer(serializers.Serializer):
 class PasswordResetConfirmSerializer(serializers.Serializer):
     uid = serializers.CharField()
     token = serializers.CharField()
-    new_password = serializers.CharField(write_only=True)  # убрали min_length
+    new_password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
         try:
@@ -181,9 +189,8 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         if not default_token_generator.check_token(self.user, attrs["token"]):
             raise serializers.ValidationError("Неверный или просроченный токен.")
 
-        # ✅ убрали password_validation.validate_password(...)
+        # password_validation убран сознательно (как у тебя было)
         return attrs
-
 
 
 # -------------------------
@@ -234,15 +241,15 @@ class ProfileSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "full_name",
-            "phone",                 # логин — только чтение
+            "phone",
             "email",
-            "pickup_point",          # read-only nested
-            "pickup_point_id",       # write-only PK
+            "pickup_point",
+            "pickup_point_id",
             "client_code",
             "client_code_display",
             "cn_warehouse_address",
             "is_staff",
-            "is_employee",           # новое: полезно видеть в профиле
+            "is_employee",
         )
         read_only_fields = ("phone", "client_code", "is_staff", "is_employee")
 
@@ -265,7 +272,6 @@ class ProfileSerializer(serializers.ModelSerializer):
         instance.pickup_point = pickup_new
         instance.save(update_fields=["full_name", "email", "pickup_point", "updated_at"])
 
-        # Если ПВЗ изменился — переназначаем клиентский код
         if pickup_new.id != pickup_was:
             instance.assign_client_code(save=True)
 
@@ -276,7 +282,7 @@ class ProfileSerializer(serializers.ModelSerializer):
 #  Трекинг
 # -------------------------
 class TrackingEventSerializer(serializers.ModelSerializer):
-    actor_name = serializers.SerializerMethodField()  # кто сканировал (если это ручной скан)
+    actor_name = serializers.SerializerMethodField()
 
     class Meta:
         model = TrackingEvent
@@ -324,10 +330,12 @@ class OrderScanSerializer(serializers.Serializer):
     created_event = TrackingEventSerializer(read_only=True)
 
     def create(self, validated_data):
-        tn = validated_data["tracking_number"].strip().upper()
-        location = validated_data.get("location", "")
+        tn = norm_track(validated_data["tracking_number"])
+        if not tn:
+            raise serializers.ValidationError({"tracking_number": "Укажите tracking_number."})
 
-        # передаём текущего пользователя в handle_scan — он проверит, сотрудник ли это
+        location = (validated_data.get("location") or "").strip()
+
         user = None
         request = self.context.get("request")
         if request and getattr(request, "user", None) and request.user.is_authenticated:
@@ -336,12 +344,16 @@ class OrderScanSerializer(serializers.Serializer):
         try:
             order, event = handle_scan(tn, location=location, user=user, raise_on_cooldown=True)
         except PermissionError as e:
-            # доступ только для сотрудников
             raise PermissionDenied(detail=str(e))
         except ValueError as e:
-            last = Order.objects.get(tracking_number=tn).last_event
             cooldown_min = getattr(settings, "SCAN_COOLDOWN_MINUTES", 5)
-            # считаем сколько осталось
+
+            # безопасно считаем wait
+            order_obj = Order.objects.filter(tracking_number=tn).first()
+            last = order_obj.last_event if order_obj else None
+            if not last:
+                raise Throttled(detail=str(e), wait=cooldown_min * 60)
+
             diff = timezone.now() - last.timestamp
             remain = max(0, cooldown_min * 60 - int(diff.total_seconds()))
             raise Throttled(detail=str(e), wait=remain)
@@ -362,4 +374,4 @@ class OrderScanSerializer(serializers.Serializer):
 class BaseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Base
-        fields = ("id", "logo","banner",)
+        fields = ("id", "logo", "banner")
