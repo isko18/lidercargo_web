@@ -98,9 +98,16 @@ class Order(models.Model):
         manual_texts = list(self.events.filter(actor__isnull=False).values_list("status", flat=True))
 
         def matches(flow_text: str, actual: str) -> bool:
+            # ✅ Шаг 1: допускаем вариант с "[LIDER CARGO]" и любые хвосты
+            if flow_text == "Товар поступил на склад в Китае":
+                return actual.startswith("Товар поступил на склад в Китае")
+
+            # ✅ Шаг 2: форматированный текст, поэтому тоже startswith
             if flow_text == "Прибыл в пункт выдачи":
                 return actual.startswith("Товар прибыл в пункт выдачи")
+
             return actual == flow_text
+
 
         progress = -1
         for idx, flow_text in enumerate(self.STATUS_FLOW):
