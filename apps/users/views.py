@@ -2,11 +2,10 @@ from django.shortcuts import render, get_object_or_404
 from django.db import transaction, IntegrityError
 from django.db.models import Prefetch
 
-from rest_framework import generics, status, permissions
+from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.exceptions import AuthenticationFailed, Throttled, PermissionDenied
 
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -33,6 +32,13 @@ def norm_track(v: str) -> str:
     """Трек: trim + upper + убрать все пробелы внутри."""
     s = (v or "").strip().upper()
     return "".join(s.split())
+
+
+def norm_str(v) -> str:
+    """Безопасно превратить возможный list/None в строку."""
+    if isinstance(v, list):
+        v = v[0] if v else ""
+    return (v or "").strip()
 
 
 # -------------------------
@@ -80,13 +86,16 @@ class LogoutAPIView(APIView):
 
     def post(self, request):
         refresh = request.data.get("refresh")
+        refresh = norm_str(refresh)
         if not refresh:
             return Response({"detail": "Требуется refresh токен."}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
             token = RefreshToken(refresh)
             token.blacklist()
         except Exception:
             pass
+
         return Response(status=status.HTTP_205_RESET_CONTENT)
 
 
@@ -208,12 +217,15 @@ class OrderScanAPIView(generics.CreateAPIView):
     permission_classes = [IsAuthenticated, IsEmployee]
 
     def create(self, request, *args, **kwargs):
-        # Не мутируем request.data напрямую (может быть QueryDict)
+        # Не мутируем request.data напрямую (QueryDict), собираем нормальный payload
         payload = dict(request.data)
-        if "tracking_number" in payload and isinstance(payload["tracking_number"], str):
-            payload["tracking_number"] = norm_track(payload["tracking_number"])
-        elif "tracking_number" in payload and isinstance(payload["tracking_number"], list) and payload["tracking_number"]:
-            payload["tracking_number"] = norm_track(payload["tracking_number"][0])
+
+        tn_raw = payload.get("tracking_number")
+        payload["tracking_number"] = norm_track(norm_str(tn_raw))
+
+        loc_raw = payload.get("location")
+        if loc_raw is not None:
+            payload["location"] = norm_str(loc_raw)
 
         serializer = self.get_serializer(data=payload)
         serializer.is_valid(raise_exception=True)
@@ -234,10 +246,9 @@ class OrderFindAPIView(APIView):
 
     def get(self, request):
         tn = request.query_params.get("tracking_number") or request.query_params.get("q")
+        tn = norm_track(tn)
         if not tn:
             return Response({"detail": "Укажите параметр tracking_number."}, status=status.HTTP_400_BAD_REQUEST)
-
-        tn = norm_track(tn)
 
         try:
             order = (
@@ -267,18 +278,12 @@ class OrderClaimAPIView(APIView):
         if not tn:
             return Response({"detail": "Укажите tracking_number."}, status=status.HTTP_400_BAD_REQUEST)
 
-        description = (request.data.get("description") or "").strip()
+        description = norm_str(request.data.get("description"))
 
         with transaction.atomic():
-            order = (
-                Order.objects.select_for_update()
-                .filter(tracking_number=tn)
-                .first()
-            )
-
+            order = Order.objects.select_for_update().filter(tracking_number=tn).first()
             created_now = False
 
-            # 1) Если заказа нет — создаём
             if not order:
                 try:
                     order = Order.objects.create(
@@ -288,24 +293,18 @@ class OrderClaimAPIView(APIView):
                     )
                     created_now = True
                 except IntegrityError:
-                    order = (
-                        Order.objects.select_for_update()
-                        .filter(tracking_number=tn)
-                        .first()
-                    )
+                    order = Order.objects.select_for_update().filter(tracking_number=tn).first()
                     created_now = False
 
             if not order:
                 return Response({"detail": "Не удалось создать/найти заказ."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # 2) Если уже привязан к другому — запрет
             if order.user_id and order.user_id != request.user.id:
                 return Response(
                     {"detail": "Заказ уже привязан к другому пользователю."},
                     status=status.HTTP_409_CONFLICT,
                 )
 
-            # 3) Присваиваем заказ текущему пользователю (статусы НЕ трогаем)
             order.user = request.user
             if created_now and description:
                 order.description = description
@@ -313,7 +312,6 @@ class OrderClaimAPIView(APIView):
             else:
                 order.save(update_fields=["user"])
 
-            # 4) Стартовый статус создаём ТОЛЬКО если трек был создан сейчас
             if created_now:
                 TrackingEvent.objects.create(
                     order=order,

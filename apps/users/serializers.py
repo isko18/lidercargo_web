@@ -63,7 +63,6 @@ class RegisterSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-        # password_validation убран сознательно (как у тебя было)
         return attrs
 
     def create(self, validated_data):
@@ -91,8 +90,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token["full_name"] = user.full_name
         token["client_code"] = user.client_code
         token["pvz_id"] = user.pickup_point_id
-        token["pvz_region"] = user.pickup_point.region_code
-        token["pvz_branch"] = user.pickup_point.branch_code  # может быть "0155", display делается на бэке
+        token["pvz_branch"] = user.pickup_point.branch_code
         token["pvz_lc_prefix"] = user.pickup_point.lc_prefix
         token["is_employee"] = user.is_employee
         return token
@@ -112,12 +110,11 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             "full_name": self.user.full_name,
             "phone": self.user.phone,
             "client_code": self.user.client_code,
-            "client_code_display": self.user.client_code_display,  # ✅ будет 155(BS-0241)
+            "client_code_display": self.user.client_code_display,  # ✅ 155(BS-0241)
             "pickup_point": {
                 "id": pvz.id,
                 "name_ru": pvz.name_ru,
                 "code_label": pvz.code_label,
-                "region_code": pvz.region_code,
                 "branch_code": pvz.branch_code,
                 "lc_prefix": pvz.lc_prefix,
             },
@@ -189,7 +186,6 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         if not default_token_generator.check_token(self.user, attrs["token"]):
             raise serializers.ValidationError("Неверный или просроченный токен.")
 
-        # password_validation убран сознательно (как у тебя было)
         return attrs
 
 
@@ -213,7 +209,6 @@ class PickupPointSerializer(serializers.ModelSerializer):
             "name_kg",
             "address",
             "code_label",
-            "region_code",
             "branch_code",
             "lc_prefix",
             "default_cn_warehouse",
@@ -348,7 +343,6 @@ class OrderScanSerializer(serializers.Serializer):
         except ValueError as e:
             cooldown_min = getattr(settings, "SCAN_COOLDOWN_MINUTES", 5)
 
-            # безопасно считаем wait
             order_obj = Order.objects.filter(tracking_number=tn).first()
             last = order_obj.last_event if order_obj else None
             if not last:

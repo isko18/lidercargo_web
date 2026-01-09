@@ -121,6 +121,7 @@ class Order(models.Model):
             return True
         return timezone.now() - last.timestamp >= timedelta(minutes=cooldown_min)
 
+    # ---------- Подстановки для статусов ----------
     def _template_context(self, actor=None):
         """
         Контекст подстановок.
@@ -133,13 +134,13 @@ class Order(models.Model):
             pp = actor.pickup_point
 
         dest_city = getattr(pp, "name_ru", "") if pp else ""
-        dest_code = f"{getattr(pp, 'region_code', '')}-{getattr(pp, 'branch_code', '')}" if pp else ""
+        dest_code = f"{getattr(pp, 'branch_code', '')}" if pp else ""
         dest_addr = getattr(pp, "address", "") if pp else ""
         dest_label = getattr(pp, "code_label", "") if pp else ""
 
         return {
             "pvz_name": dest_label or dest_city,
-            "pvz_code": dest_code,
+            "pvz_code": dest_code,  # ✅ теперь только branch_code (без region_code)
             "pvz_address": dest_addr,
             "track": self.tracking_number,
             "dest_city": dest_city,
@@ -153,10 +154,10 @@ class Order(models.Model):
         except Exception:
             return template_text
 
+    # ---------- Автоматические статусы по времени ----------
     PHASE_BY_STATUS = {
         "Товар поступил на склад в Китае [LIDER CARGO]": "AFTER_SCAN_1",
         "Товар поступил на склад в Китае": "AFTER_SCAN_1",
-        # "Прибыл в пункт выдачи": "AFTER_SCAN_2",  # этот ключ фактически не используется (у тебя форматированный текст)
     }
 
     def apply_scan(self, location: str = "", actor=None):
@@ -298,7 +299,6 @@ class WarehouseCN(models.Model):
 
 
 # валидаторы
-DIG2 = RegexValidator(r"^\d{2}$", 'Требуется двузначный код, например "01".')
 DIG_1_4 = RegexValidator(r"^\d{1,4}$", 'Код филиала: 1–4 цифры, например "155" или "0155".')
 
 
@@ -316,7 +316,7 @@ class PickupPoint(models.Model):
         help_text="Можно оставить для админки/вывески (в личный код больше не входит).",
     )
 
-    region_code = models.CharField("Код региона", max_length=2, validators=[DIG2])
+    # ✅ УДАЛЕНО: region_code
     branch_code = models.CharField("Код филиала", max_length=4, validators=[DIG_1_4])
 
     lc_prefix = models.CharField(
@@ -344,7 +344,7 @@ class PickupPoint(models.Model):
         verbose_name = "Пункт выдачи"
         verbose_name_plural = "Пункты выдачи"
         indexes = [
-            models.Index(fields=["region_code", "branch_code"]),
+            models.Index(fields=["branch_code"]),
             models.Index(fields=["is_active"]),
         ]
 
@@ -353,7 +353,7 @@ class PickupPoint(models.Model):
 
     @property
     def code_pair(self) -> str:
-        return f"{self.region_code}-{self.branch_code}"
+        return f"{self.branch_code}"
 
 
 # =========================
@@ -372,7 +372,6 @@ class UserManager(BaseUserManager):
         user = self.model(phone=phone, **extra_fields)
         user.set_password(password)
 
-        # генерим lc/client_code до сохранения — это ОК, потому что формат не зависит от user.id
         if not user.client_code:
             user.assign_client_code(save=False)
 
@@ -399,7 +398,6 @@ class UserManager(BaseUserManager):
                     name_kg="Админ",
                     address="",
                     code_label="Админ",
-                    region_code="00",
                     branch_code="0",
                     lc_prefix="ADM",
                     is_active=True,
@@ -453,9 +451,6 @@ class User(AbstractBaseUser, PermissionsMixin):
         blank=True,
     )
 
-    # ✅ УДАЛЕНО: region_code (ручной ввод)
-    # region_code = models.CharField("Код региона (ручной ввод)", max_length=10, blank=True)
-
     is_employee = models.BooleanField("Сотрудник", default=False)
 
     is_blocked = models.BooleanField("Заблокирован", default=False)
@@ -483,7 +478,6 @@ class User(AbstractBaseUser, PermissionsMixin):
         s = (branch_code or "").strip()
         if not s:
             return "0"
-        # "0155" -> "155"
         s2 = s.lstrip("0")
         return s2 if s2 else "0"
 
