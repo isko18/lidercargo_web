@@ -15,6 +15,7 @@ from django.utils import timezone
 class Base(models.Model):
     logo = models.ImageField(verbose_name="лого", upload_to="logo/", null=True, blank=True)
     banner = models.FileField(verbose_name="Баннер", upload_to="banner/", null=True, blank=True)
+    phone = models.CharField("Номер телефона", max_length=32, blank=True, default="")  
 
     class Meta:
         verbose_name = "Настройка"
@@ -123,10 +124,6 @@ class Order(models.Model):
 
     # ---------- Подстановки для статусов ----------
     def _template_context(self, actor=None):
-        """
-        Контекст подстановок.
-        Назначение берём из ПВЗ клиента (owner), если его нет — из ПВЗ сотрудника, который сканирует.
-        """
         pp = None
         if getattr(self, "user", None) and getattr(self.user, "pickup_point", None):
             pp = self.user.pickup_point
@@ -134,19 +131,34 @@ class Order(models.Model):
             pp = actor.pickup_point
 
         dest_city = getattr(pp, "name_ru", "") if pp else ""
-        dest_code = f"{getattr(pp, 'branch_code', '')}" if pp else ""
         dest_addr = getattr(pp, "address", "") if pp else ""
         dest_label = getattr(pp, "code_label", "") if pp else ""
 
+        # ✅ pvz_code как "ER-011"
+        prefix = getattr(pp, "lc_prefix", "") if pp else ""
+        branch_raw = getattr(pp, "branch_code", "") if pp else ""
+        branch_digits = "".join(ch for ch in str(branch_raw) if ch.isdigit())
+        branch_3 = branch_digits.zfill(3) if branch_digits else ""
+        pvz_code = f"{prefix}-{branch_3}" if prefix and branch_3 else (branch_raw or "")
+
+        # ✅ телефон берём из Base (первая запись)
+        base_phone = ""
+        try:
+            base_phone = (Base.objects.values_list("phone", flat=True).first() or "").strip()
+        except Exception:
+            base_phone = ""
+
         return {
             "pvz_name": dest_label or dest_city,
-            "pvz_code": dest_code,  # ✅ теперь только branch_code (без region_code)
+            "pvz_code": pvz_code,
             "pvz_address": dest_addr,
+            "pvz_phone": base_phone,          # ✅ новое
             "track": self.tracking_number,
             "dest_city": dest_city,
             "dest_label": dest_label,
-            "dest_code": dest_code,
+            "dest_code": pvz_code,
         }
+
 
     def _render_text(self, template_text: str, actor=None) -> str:
         try:
@@ -183,8 +195,9 @@ class Order(models.Model):
 
         if nxt == "Прибыл в пункт выдачи":
             status_text = self._render_text(
-                "Товар прибыл в пункт выдачи "
-                "[{pvz_name} {pvz_code}, трек-номер: {track}, адрес: {pvz_address}]",
+                "Товар прибыл в пункт выдачи {dest_city} {pvz_code}\n"
+                "Адрес: {pvz_address}\n"
+                "Номер телефона: {pvz_phone}",
                 actor=actor,
             )
 

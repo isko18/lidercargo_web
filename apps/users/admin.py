@@ -10,7 +10,10 @@ from .models import (
     Base,
 )
 
-admin.site.register(Base)
+@admin.register(Base)
+class BaseAdmin(admin.ModelAdmin):
+    list_display = ("id", "phone")
+
 
 
 @admin.register(User)
