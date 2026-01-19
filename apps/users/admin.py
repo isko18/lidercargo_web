@@ -12,7 +12,7 @@ from .models import (
 
 @admin.register(Base)
 class BaseAdmin(admin.ModelAdmin):
-    list_display = ("id", "phone")
+    list_display = ("id",)
 
 
 
@@ -37,10 +37,10 @@ class UserAdmin(admin.ModelAdmin):
 
 @admin.register(PickupPoint)
 class PickupPointAdmin(admin.ModelAdmin):
-    list_display = ("name_ru", "branch_code", "lc_prefix", "is_active")
+    list_display = ("name_ru", "branch_code", "lc_prefix", "phone", "is_active")
     list_filter = ("is_active",)
     # ✅ убрали region_code из поиска
-    search_fields = ("name_ru", "branch_code", "code_label", "lc_prefix")
+    search_fields = ("name_ru", "branch_code", "code_label", "lc_prefix", "phone")
 
 
 @admin.register(WarehouseCN)

@@ -15,7 +15,6 @@ from django.utils import timezone
 class Base(models.Model):
     logo = models.ImageField(verbose_name="лого", upload_to="logo/", null=True, blank=True)
     banner = models.FileField(verbose_name="Баннер", upload_to="banner/", null=True, blank=True)
-    phone = models.CharField("Номер телефона", max_length=32, blank=True, default="")  
 
     class Meta:
         verbose_name = "Настройка"
@@ -148,18 +147,15 @@ class Order(models.Model):
         branch_3 = branch_digits.zfill(3) if branch_digits else ""
         pvz_code = f"{prefix}-{branch_3}" if prefix and branch_3 else (branch_raw or "")
 
-        # ✅ телефон берём из Base (первая запись)
-        base_phone = ""
-        try:
-            base_phone = (Base.objects.values_list("phone", flat=True).first() or "").strip()
-        except Exception:
-            base_phone = ""
+        # ✅ телефон берём из PickupPoint
+        pvz_phone = getattr(pp, "phone", "") if pp else ""
+        pvz_phone = (pvz_phone or "").strip()
 
         return {
             "pvz_name": dest_label or dest_city,
             "pvz_code": pvz_code,
             "pvz_address": dest_addr,
-            "pvz_phone": base_phone,          # ✅ новое
+            "pvz_phone": pvz_phone,
             "track": self.tracking_number,
             "dest_city": dest_city,
             "dest_label": dest_label,
@@ -329,6 +325,7 @@ class PickupPoint(models.Model):
     name_ru = models.CharField("Название (RU)", max_length=80)
     name_kg = models.CharField("Аталышы (KG)", max_length=80, blank=True)
     address = models.CharField("Адрес (локальный)", max_length=255, blank=True)
+    phone = models.CharField("Номер телефона", max_length=32, blank=True, default="")
 
     code_label = models.CharField(
         "Метка для клиентского кода",

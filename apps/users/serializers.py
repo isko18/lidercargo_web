@@ -208,6 +208,7 @@ class PickupPointSerializer(serializers.ModelSerializer):
             "name_ru",
             "name_kg",
             "address",
+            "phone",
             "code_label",
             "branch_code",
             "lc_prefix",
@@ -368,4 +369,4 @@ class OrderScanSerializer(serializers.Serializer):
 class BaseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Base
-        fields = ("id", "logo", "banner", "phone")
+        fields = ("id", "logo", "banner")
